@@ -140,6 +140,23 @@ class HookHTTPHandler(BaseHTTPRequestHandler):
                 self.send_response(500)
                 self.end_headers()
                 self.wfile.write(str(e).encode("utf-8"))
+        elif self.path == "/notify":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            try:
+                data = json.loads(body)
+                asyncio.run_coroutine_threadsafe(
+                    bridge.send_prompt(data),
+                    bridge.loop
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(str(e).encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
