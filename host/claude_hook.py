@@ -44,27 +44,30 @@ def is_safe_readonly_bash(command):
 
 
 def format_prompt(event_name, tool_name, tool_input):
-    """根据不同的工具类型生成副屏友好的标题与描述"""
+    """根据不同的工具类型生成副屏友好的标题、描述、角标与分类标签"""
     if tool_name == "Bash":
         cmd = tool_input.get("command", "")
-        return "终端命令执行", f"执行: {cmd[:80]}"
+        tag = "CRITICAL" if any(k in cmd for k in ["rm", "force", "drop", "sudo", "delete"]) else "HIGH RISK"
+        return "[BASH EXEC]", tag, "终端命令执行", f"执行: {cmd[:80]}"
     elif tool_name in ["Write", "Edit"]:
         file_path = tool_input.get("file_path", "")
-        return f"文件修改 ({tool_name})", f"目标: {file_path[:60]}"
+        tag = "SRC WRITE" if tool_name == "Write" else "CONFIG EDIT"
+        return f"[{tool_name.upper()} FILE]", tag, f"文件修改 ({tool_name})", f"目标: {file_path[:60]}"
     elif tool_name in ["WebSearch", "Web Search"]:
         query = tool_input.get("query", "")
-        return "联网搜索", f"检索: {query[:70]}"
+        return "[WEB SEARCH]", "NETWORK", "联网搜索", f"检索: {query[:70]}"
     elif tool_name in ["WebFetch", "Web Fetch"]:
         url = tool_input.get("url", "")
-        return "网页内容抓取", f"网址: {url[:70]}"
+        return "[WEB FETCH]", "NETWORK", "网页内容抓取", f"网址: {url[:70]}"
     elif tool_name == "NotebookEditCell":
         nb = tool_input.get("notebook_path", "")
-        return "Notebook 编辑", f"文件: {nb[:60]}"
+        return "[NOTEBOOK]", "JUPYTER", "Notebook 编辑", f"文件: {nb[:60]}"
     elif tool_name.startswith("mcp__"):
-        return f"MCP 工具 ({tool_name[5:20]})", json.dumps(tool_input, ensure_ascii=False)[:80]
+        mcp_name = tool_name[5:20]
+        return "[MCP TOOL]", mcp_name.upper(), f"MCP ({mcp_name})", json.dumps(tool_input, ensure_ascii=False)[:80]
     else:
         desc = json.dumps(tool_input, ensure_ascii=False) if tool_input else "是否允许执行此操作？"
-        return f"权限确认: {tool_name[:15]}", desc[:80]
+        return "[PERMISSION]", "CONFIRM", f"权限确认: {tool_name[:15]}", desc[:80]
 
 
 def print_pre_tool_use_decision(decision, reason=""):
@@ -126,20 +129,25 @@ def main():
             command = tool_input.get("command", "").strip()
             if is_safe_readonly_bash(command):
                 sys.exit(0)
-            title, desc = format_prompt(event_name, tool_name, tool_input)
+            badge, tag, title, desc = format_prompt(event_name, tool_name, tool_input)
+        elif tool_name == "AskUserQuestion":
+            # This is Claude Code's native interactive question UI. It is not a
+            # tool-permission approval, and it may have more than two options.
+            # Let the terminal handle it instead of blocking on the deck.
+            sys.exit(0)
         elif tool_name in ["Write", "Edit"]:
-            title, desc = format_prompt(event_name, tool_name, tool_input)
+            badge, tag, title, desc = format_prompt(event_name, tool_name, tool_input)
         else:
             # Other tools may still generate a PermissionRequest later.
             sys.exit(0)
     elif event_name == "PermissionRequest":
-        title, desc = format_prompt(event_name, tool_name, tool_input)
+        badge, tag, title, desc = format_prompt(event_name, tool_name, tool_input)
     else:
         sys.exit(0)
 
     req = urllib.request.Request(
         "http://127.0.0.1:19842/prompt",
-        data=json.dumps({"title": title, "desc": desc}, ensure_ascii=False).encode("utf-8"),
+        data=json.dumps({"badge": badge, "tag": tag, "title": title, "desc": desc}, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
