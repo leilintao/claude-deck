@@ -79,18 +79,23 @@ class DeckBridge:
             text = data.decode("utf-8", errors="ignore").strip().upper()
             logging.info(f"👉 收到副屏触控反馈: {text}")
 
-            if ":" in text:
-                token, request_id = text.split(":", 1)
+            if text.startswith("SELECT:"):
+                parts = text.split(":")
+                if len(parts) != 3:
+                    logging.warning("忽略格式错误的选项回复: %r", text)
+                    return
+                token = "SELECT"
+                request_id = parts[1]
+                decision = {"kind": "select", "index": int(parts[2])}
             else:
-                token, request_id = text, ""
-
-            if token == "ALLOW":
-                decision = "allow"
-            elif token == "DENY":
-                decision = "deny"
-            else:
-                logging.warning("忽略未知 BLE payload: %r", text)
-                return
+                token, request_id = (text.split(":", 1) if ":" in text else (text, ""))
+                if token == "ALLOW":
+                    decision = "allow"
+                elif token == "DENY":
+                    decision = "deny"
+                else:
+                    logging.warning("忽略未知 BLE payload: %r", text)
+                    return
 
             waiter = self.pending_requests.get(request_id)
             if not waiter:
@@ -118,7 +123,51 @@ class DeckBridge:
         payload = {"type": "status", "status": status, "desc": desc}
         await self.send_prompt(payload)
 
-    async def ask_user(self, title, desc, options=["允许 (Y)", "拒绝 (N)"], timeout=120):
+    async def ask_question(self, header, question, options, timeout=120):
+        """Show one Claude question on the deck and return the selected index."""
+        if not self.is_connected:
+            logging.warning("副屏未连接，Claude 问题回退到终端原生 UI")
+            return None
+
+        if len(options) < 2:
+            return None
+
+        request_id = uuid.uuid4().hex[:16]
+        waiter = {"event": asyncio.Event(), "response": None}
+        self.pending_requests[request_id] = waiter
+
+        payload = {
+            "type": "question",
+            "id": request_id,
+            "header": header[:20],
+            "question": question[:140],
+            "options": options[:8],
+        }
+
+        try:
+            sent = await self.send_prompt(payload)
+            if not sent:
+                logging.warning("副屏问题推送失败，回退到终端原生 UI")
+                return None
+
+            logging.info(f"已推送 Claude 问题至副屏: [{request_id}] {question}")
+            try:
+                await asyncio.wait_for(waiter["event"].wait(), timeout=timeout)
+                response = waiter["response"]
+                if isinstance(response, dict) and response.get("kind") == "select":
+                    index = int(response.get("index", -1))
+                    if 0 <= index < len(options):
+                        logging.info(f"副屏用户选择选项: {index}")
+                        return index
+                return None
+            except asyncio.TimeoutError:
+                logging.warning("副屏问题响应超时 (%ss)，回退到终端原生 UI", timeout)
+                await self.send_status("idle", "Claude 问题超时，请在终端继续回答")
+                return None
+        finally:
+            self.pending_requests.pop(request_id, None)
+
+    async def ask_user(self, title, desc, options=["允许 (Y)", "拒绝 (N)"], badge="", tag="", timeout=120):
         if not self.is_connected:
             logging.warning("副屏未连接，按离线策略返回: %s", OFFLINE_POLICY)
             return self.offline_decision()
@@ -133,6 +182,8 @@ class DeckBridge:
         payload = {
             "type": "prompt",
             "id": request_id,
+            "badge": badge,
+            "tag": tag,
             "title": title[:30],
             "desc": desc[:100],
             "options": options,
@@ -144,7 +195,7 @@ class DeckBridge:
                 logging.warning("副屏推送失败，按离线策略返回: %s", OFFLINE_POLICY)
                 return self.offline_decision()
 
-            logging.info(f"已推送问题至副屏: [{request_id}] [{title}] {desc}")
+            logging.info(f"已推送问题至副屏: [{request_id}] [{badge or title}] {desc}")
 
             try:
                 await asyncio.wait_for(waiter["event"].wait(), timeout=timeout)
@@ -164,7 +215,38 @@ bridge = DeckBridge()
 
 class HookHTTPHandler(BaseHTTPRequestHandler):
     def do_POST(self):
-        if self.path == "/prompt":
+        if self.path == "/question":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            try:
+                data = json.loads(body)
+                header = data.get("header", "QUESTION")
+                question = data.get("question", "")
+                options = data.get("options", [])
+
+                future = asyncio.run_coroutine_threadsafe(
+                    bridge.ask_question(header, question, options),
+                    bridge.loop,
+                )
+                index = future.result(timeout=130)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps(
+                        {
+                            "answered": index is not None,
+                            "index": index,
+                        }
+                    ).encode("utf-8")
+                )
+            except Exception as e:
+                logging.exception("处理 Claude 问题失败")
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(str(e).encode("utf-8"))
+        elif self.path == "/prompt":
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length).decode("utf-8")
             try:
@@ -172,9 +254,11 @@ class HookHTTPHandler(BaseHTTPRequestHandler):
                 title = data.get("title", "Claude 权限请求")
                 desc = data.get("desc", "是否允许执行此操作？")
                 options = data.get("options", ["允许 (Y)", "拒绝 (N)"])
+                badge = data.get("badge", "")
+                tag = data.get("tag", "")
 
                 future = asyncio.run_coroutine_threadsafe(
-                    bridge.ask_user(title, desc, options),
+                    bridge.ask_user(title, desc, options, badge=badge, tag=tag),
                     bridge.loop,
                 )
                 decision = future.result(timeout=130)

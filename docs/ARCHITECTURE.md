@@ -75,7 +75,7 @@ flowchart TD
 
     subgraph Hardware_Device ["ESP32-2432S028 硬件副屏 (CYD)"]
         BLE_Server["NimBLE GATT Server"]
-        StateMachine["UI 状态机 (IDLE / PROMPT / ANSWERED)"]
+        StateMachine["UI 状态机 (IDLE / PROMPT / QUESTION / ANSWERED)"]
         LGFX_Driver["LovyanGFX (ILI9341 硬件 SPI)"]
         Touch_Driver["XPT2046_Touchscreen (独立 VSPI)"]
         Peripherals["RGB LED (低电平) + 蜂鸣器 DAC"]
@@ -229,9 +229,19 @@ ESP32-2432S028 在不同厂家和批次中存在少量硬件差异，本项目�
   2. **上行方向（ESP32 -> Mac）**：副屏仅上报极度精简的定长 ASCII Token：
      - 用户点绿色按钮：回传 `"ALLOW:<request_id>"`
      - 用户点红色按钮：回传 `"DENY:<request_id>"`
+     - Claude 提问页点选某个选项：回传 `"SELECT:<request_id>:<option_index>"`
   3. 这种设计保证了上行触控反馈永远在单个 BLE ATT 基础包内瞬间送达，零分包、零延迟、零丢包率。
 
-### 4.5 坑五：Claude Code Hook 阻塞与超时防御机制
+### 4.5 Claude 提问页（AskUserQuestion）
+Claude Code 的 `AskUserQuestion` 不再交给终端独占处理，而是推送到副屏形成专用问答页：
+
+- 每个问题一屏展示，支持问题标题、正文和选项描述；
+- 每页最多显示 2 个选项，超过 2 个自动分页；
+- 当前固件支持最多 8 个选项 / 题，足够覆盖 Claude Code 的 2~4 个选项模型；
+- 用户点选某个选项后，固件通过 `SELECT:<request_id>:<option_index>` 回传；
+- 如果副屏离线或超时，问题自动回退到 Claude Code 终端原生 UI，不会永久阻塞。
+
+### 4.6 坑五：Claude Code Hook 阻塞与超时防御机制
 - **现象**：如果在编程过程中副屏突然没电、关机或者蓝牙暂时受到干扰，Claude Code CLI 是否会永久卡死在等待确认的阶段？
 - **根因分析**：Claude Code 的 `PreToolUse` Hook 是同步阻塞式的。Hook 进程不退出，Claude 就不执行下一步。
 - **终极解法**：三重容灾熔断策略：

@@ -70,6 +70,49 @@ def format_prompt(event_name, tool_name, tool_input):
         return "[PERMISSION]", "CONFIRM", f"权限确认: {tool_name[:15]}", desc[:80]
 
 
+def ask_deck_question(question):
+    options = []
+    for option in question.get("options", [])[:8]:
+        options.append(
+            {
+                "label": str(option.get("label", ""))[:36],
+                "description": str(option.get("description", ""))[:72],
+            }
+        )
+
+    payload = {
+        "header": str(question.get("header", "QUESTION"))[:20],
+        "question": str(question.get("question", ""))[:140],
+        "options": options,
+    }
+    req = urllib.request.Request(
+        "http://127.0.0.1:19842/question",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        result = json.loads(resp.read().decode("utf-8"))
+        if not result.get("answered"):
+            return None
+        index = int(result.get("index", -1))
+        if 0 <= index < len(options):
+            return options[index]["label"]
+        return None
+
+
+def print_ask_user_answers(answers):
+    reason = {
+        "source": "claude-deck",
+        "instruction": "The user answered AskUserQuestion on the physical deck. Treat these as the user's answers and continue without calling AskUserQuestion again.",
+        "answers": answers,
+    }
+    print_pre_tool_use_decision(
+        "deny",
+        json.dumps(reason, ensure_ascii=False),
+    )
+
+
 def print_pre_tool_use_decision(decision, reason=""):
     output = {
         "hookSpecificOutput": {
@@ -131,10 +174,35 @@ def main():
                 sys.exit(0)
             badge, tag, title, desc = format_prompt(event_name, tool_name, tool_input)
         elif tool_name == "AskUserQuestion":
-            # This is Claude Code's native interactive question UI. It is not a
-            # tool-permission approval, and it may have more than two options.
-            # Let the terminal handle it instead of blocking on the deck.
-            sys.exit(0)
+            questions = tool_input.get("questions", [])
+            answers = []
+            for question in questions:
+                selected = ask_deck_question(question)
+                if selected is None:
+                    if answers:
+                        # Some questions were already answered on the deck. Give
+                        # the model the partial result and ask it to redo the rest.
+                        answers.append(
+                            {
+                                "header": str(question.get("header", "")),
+                                "question": str(question.get("question", "")),
+                                "selected": None,
+                                "status": "unanswered: use terminal on retry",
+                            }
+                        )
+                    else:
+                        # No deck answer at all; let Claude Code use its native UI.
+                        sys.exit(0)
+                else:
+                    answers.append(
+                        {
+                            "header": str(question.get("header", "")),
+                            "question": str(question.get("question", "")),
+                            "selected": selected,
+                        }
+                    )
+
+            print_ask_user_answers(answers)
         elif tool_name in ["Write", "Edit"]:
             badge, tag, title, desc = format_prompt(event_name, tool_name, tool_input)
         else:
