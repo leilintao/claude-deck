@@ -1,0 +1,29 @@
+# PlatformIO
+.pio
+.pioenvs
+.piolibdeps
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+.venv/
+env/
+venv/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build artifacts
+*.bin
+*.elf
+*.hex
