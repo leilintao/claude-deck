@@ -224,9 +224,13 @@ def main():
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             res = json.loads(resp.read().decode("utf-8"))
             decision = res.get("decision", OFFLINE_POLICY)
+            reason = res.get("reason") or (
+                "用户在 Claude-Deck 物理副屏上点击了拒绝"
+                if decision == "deny"
+                else "Claude-Deck 允许本次操作"
+            )
 
             if decision == "deny":
-                reason = "用户在 Claude-Deck 物理副屏上点击了拒绝"
                 if event_name == "PermissionRequest":
                     print_permission_request_decision("deny", reason)
                 else:

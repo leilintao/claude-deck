@@ -168,9 +168,10 @@ class DeckBridge:
             self.pending_requests.pop(request_id, None)
 
     async def ask_user(self, title, desc, options=["允许 (Y)", "拒绝 (N)"], badge="", tag="", timeout=120):
+        offline_reason = f"副屏离线，按 CLAUDE_DECK_OFFLINE_POLICY={OFFLINE_POLICY} 自动拒绝"
         if not self.is_connected:
-            logging.warning("副屏未连接，按离线策略返回: %s", OFFLINE_POLICY)
-            return self.offline_decision()
+            logging.warning("%s", offline_reason)
+            return self.offline_decision(), offline_reason
 
         request_id = uuid.uuid4().hex[:16]
         waiter = {
@@ -192,20 +193,27 @@ class DeckBridge:
         try:
             sent = await self.send_prompt(payload)
             if not sent:
-                logging.warning("副屏推送失败，按离线策略返回: %s", OFFLINE_POLICY)
-                return self.offline_decision()
+                reason = "副屏 BLE 推送失败，按安全策略自动拒绝"
+                logging.warning(reason)
+                return self.offline_decision(), reason
 
             logging.info(f"已推送问题至副屏: [{request_id}] [{badge or title}] {desc}")
 
             try:
                 await asyncio.wait_for(waiter["event"].wait(), timeout=timeout)
                 decision = waiter["response"] or self.offline_decision()
+                reason = "副屏响应无效，按安全策略自动拒绝"
+                if decision == "deny":
+                    reason = "用户在 Claude-Deck 物理副屏上点击了拒绝"
+                elif decision == "allow":
+                    reason = "用户在 Claude-Deck 物理副屏上点击了允许"
                 logging.info(f"副屏用户做出选择: {decision}")
-                return decision
+                return decision, reason
             except asyncio.TimeoutError:
-                logging.warning("副屏响应超时 (%ss)，自动拒绝并回写状态", timeout)
+                reason = f"副屏响应超时 ({timeout}s)，按安全策略自动拒绝"
+                logging.warning(reason)
                 await self.send_status("expired", "请求已超时，终端已自动拒绝")
-                return "deny"
+                return "deny", reason
         finally:
             self.pending_requests.pop(request_id, None)
 
@@ -261,12 +269,12 @@ class HookHTTPHandler(BaseHTTPRequestHandler):
                     bridge.ask_user(title, desc, options, badge=badge, tag=tag),
                     bridge.loop,
                 )
-                decision = future.result(timeout=130)
+                decision, reason = future.result(timeout=130)
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"decision": decision}).encode("utf-8"))
+                self.wfile.write(json.dumps({"decision": decision, "reason": reason}).encode("utf-8"))
             except Exception as e:
                 logging.exception("处理 Hook 请求失败")
                 self.send_response(500)
