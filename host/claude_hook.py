@@ -12,7 +12,7 @@ OFFLINE_POLICY = os.environ.get("CLAUDE_DECK_OFFLINE_POLICY", "deny").strip().lo
 if OFFLINE_POLICY not in {"allow", "deny"}:
     OFFLINE_POLICY = "deny"
 
-HTTP_TIMEOUT = 125
+HTTP_TIMEOUT = 35
 
 SAFE_BASH_PREFIXES = [
     "pwd",
@@ -21,26 +21,56 @@ SAFE_BASH_PREFIXES = [
     "git branch",
     "git diff",
     "git log",
+    "git show",
     "rg",
     "cat",
     "which",
+    "whereis",
+    "find",
+    "head",
+    "tail",
+    "grep",
+    "egrep",
+    "echo",
+    "wc",
+    "file",
+    "stat",
+    "df",
+    "du",
+    "tree",
+    "env",
+    "printenv",
+    "whoami",
+    "uname",
+    "uptime",
 ]
 
+# 不允许的写操作/高危重定向或替换符
+DANGEROUS_TOKENS = [">", "<", "`", "$("]
 
-def shell_has_control_operators(command):
-    # This is intentionally conservative. It is a read-only noise filter, not
-    # a shell parser or sandbox.
-    return any(token in command for token in [";", "&&", "||", "|", ">", "<", "`", "$("])
+
+def is_single_command_safe(cmd):
+    cmd = cmd.strip()
+    if not cmd:
+        return True
+    return any(
+        cmd == prefix or cmd.startswith(prefix + " ")
+        for prefix in SAFE_BASH_PREFIXES
+    )
 
 
 def is_safe_readonly_bash(command):
     command = command.strip()
-    if not command or shell_has_control_operators(command):
+    if not command:
         return False
-    return any(
-        command == prefix or command.startswith(prefix + " ")
-        for prefix in SAFE_BASH_PREFIXES
-    )
+    # 禁止输出重定向、输入重定向、命令替换
+    if any(token in command for token in DANGEROUS_TOKENS):
+        return False
+
+    # 支持将由 &&, ||, |, ; 连接的复合命令拆解检查：只要每个子命令都是安全的只读命令，即放行
+    import re
+    parts = re.split(r'&&|\|\||\||;', command)
+    return all(is_single_command_safe(part) for part in parts)
 
 
 def format_prompt(event_name, tool_name, tool_input):
@@ -70,47 +100,40 @@ def format_prompt(event_name, tool_name, tool_input):
         return "[PERMISSION]", "CONFIRM", f"权限确认: {tool_name[:15]}", desc[:80]
 
 
-def ask_deck_question(question):
+def notify_deck_question(question):
     options = []
-    for option in question.get("options", [])[:8]:
-        options.append(
-            {
-                "label": str(option.get("label", ""))[:36],
-                "description": str(option.get("description", ""))[:72],
-            }
-        )
+    for option in question.get("options", [])[:4]:
+        if isinstance(option, dict):
+            options.append(
+                {
+                    "label": str(option.get("label", option.get("text", "")))[:36],
+                    "description": str(option.get("description", ""))[:72],
+                }
+            )
+        else:
+            opt_str = str(option)
+            options.append(
+                {
+                    "label": opt_str[:36],
+                    "description": "",
+                }
+            )
 
     payload = {
         "header": str(question.get("header", "QUESTION"))[:20],
         "question": str(question.get("question", ""))[:140],
         "options": options,
     }
-    req = urllib.request.Request(
-        "http://127.0.0.1:19842/question",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-        result = json.loads(resp.read().decode("utf-8"))
-        if not result.get("answered"):
-            return None
-        index = int(result.get("index", -1))
-        if 0 <= index < len(options):
-            return options[index]["label"]
-        return None
-
-
-def print_ask_user_answers(answers):
-    reason = {
-        "source": "claude-deck",
-        "instruction": "The user answered AskUserQuestion on the physical deck. Treat these as the user's answers and continue without calling AskUserQuestion again.",
-        "answers": answers,
-    }
-    print_pre_tool_use_decision(
-        "deny",
-        json.dumps(reason, ensure_ascii=False),
-    )
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:19842/notify_question",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=1.5)
+    except Exception:
+        pass
 
 
 def print_pre_tool_use_decision(decision, reason=""):
@@ -175,40 +198,19 @@ def main():
             badge, tag, title, desc = format_prompt(event_name, tool_name, tool_input)
         elif tool_name == "AskUserQuestion":
             questions = tool_input.get("questions", [])
-            answers = []
             for question in questions:
-                selected = ask_deck_question(question)
-                if selected is None:
-                    if answers:
-                        # Some questions were already answered on the deck. Give
-                        # the model the partial result and ask it to redo the rest.
-                        answers.append(
-                            {
-                                "header": str(question.get("header", "")),
-                                "question": str(question.get("question", "")),
-                                "selected": None,
-                                "status": "unanswered: use terminal on retry",
-                            }
-                        )
-                    else:
-                        # No deck answer at all; let Claude Code use its native UI.
-                        sys.exit(0)
-                else:
-                    answers.append(
-                        {
-                            "header": str(question.get("header", "")),
-                            "question": str(question.get("question", "")),
-                            "selected": selected,
-                        }
-                    )
-
-            print_ask_user_answers(answers)
+                notify_deck_question(question)
+            # 放行，让终端原生交互界面同时显示问题，两端同步
+            sys.exit(0)
         elif tool_name in ["Write", "Edit"]:
             badge, tag, title, desc = format_prompt(event_name, tool_name, tool_input)
         else:
             # Other tools may still generate a PermissionRequest later.
             sys.exit(0)
     elif event_name == "PermissionRequest":
+        if tool_name == "AskUserQuestion":
+            # 终端已在处理交互，直接放行
+            sys.exit(0)
         badge, tag, title, desc = format_prompt(event_name, tool_name, tool_input)
     else:
         sys.exit(0)

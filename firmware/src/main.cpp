@@ -7,6 +7,9 @@
 #include <ArduinoJson.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <vector>
+// LovyanGFX has full GB2312 Chinese font support (efontCN) built-in
+// No external filesystem or massive font arrays required!
 
 // ==========================================
 // 1. Hardware Pin Definitions for CYD (HW-458)
@@ -70,12 +73,23 @@ typedef struct {
   char status[24];
   char header[24];
   char question[160];
-  char optionLabels[8][36];
-  char optionDescriptions[8][72];
+  char optionLabels[4][28];
+  char optionDescriptions[4][52];
   uint8_t optionCount;
 } DeckMessage;
 
 static QueueHandle_t uiQueue = nullptr;
+
+// The BLE callback owns allocation of these messages. The queue carries only
+// pointers; loop() consumes and frees them. This keeps large payloads off the
+// NimBLE task stack.
+static DeckMessage* allocateDeckMessage() {
+  void* memory = pvPortMalloc(sizeof(DeckMessage));
+  if (memory == nullptr) return nullptr;
+  DeckMessage* msg = static_cast<DeckMessage*>(memory);
+  memset(msg, 0, sizeof(DeckMessage));
+  return msg;
+}
 
 static UIState currentState = STATE_IDLE;
 static char pendingRequestId[48] = "";
@@ -87,44 +101,66 @@ static String option1Text = "允许 (Y)";
 static String option2Text = "拒绝 (N)";
 static String questionHeaderText = "QUESTION";
 static String questionText = "";
-static String questionOptionLabels[8];
-static String questionOptionDescriptions[8];
+static String questionOptionLabels[4];
+static String questionOptionDescriptions[4];
 static uint8_t questionOptionCount = 0;
 static uint8_t questionPage = 0;
 static unsigned long lastTouchTime = 0;
 
-#define QUESTION_MAX_OPTIONS 8
+#define QUESTION_MAX_OPTIONS 4
 #define QUESTION_PER_PAGE 2
-#define QUESTION_ROW_X 12
-#define QUESTION_ROW_W 296
+#define QUESTION_ROW_X 8
+#define QUESTION_ROW_W 278
 #define QUESTION_ROW_H 52
 #define QUESTION_ROW1_Y 92
-#define QUESTION_ROW2_Y 152
+#define QUESTION_ROW2_Y 150
 #define QUESTION_NAV_Y 210
 
+// 选项卡右侧加宽滑动条规范 (宽度 18px，舒适好点好识别)
+#define SCROLLBAR_X 294
+#define SCROLLBAR_W 18
+#define SCROLLBAR_Y 92
+#define SCROLLBAR_H 110
+
 // ==========================================
-// Anthropic Studio Minimalist Design Palette (RGB565)
+// Cyberdeck Studio 2.0 Palette (RGB565)
 // ==========================================
-#define COLOR_BG            0x10A2 // #121316 Deep obsidian
-#define COLOR_HEADER_BG     0x18C3 // #16171B Status bar
-#define COLOR_HEADER_LINE   0x2966 // #2A2B33 Divider line
-#define COLOR_CARD_BG       0x1CE4 // #1C1D22 Card surface
-#define COLOR_CARD_BORDER   0x31A7 // #32343D Subtle card border
-#define COLOR_CARD_INNER    0x0861 // #0B0C0E Deep terminal codebox
-#define COLOR_TERRACOTTA    0xD52F // #D4A27F Anthropic Terracotta
-#define COLOR_AMBER_GLOW    0xFCE0 // #FBBF24 Warning / Active Amber
+#define COLOR_BG            0x0862 // #090A0F Ultra-deep Obsidian
+#define COLOR_HEADER_BG     0x10A3 // #10121A Status Bar
+#define COLOR_HEADER_LINE   0x2147 // #232A3B Header Divider
+#define COLOR_CARD_BG       0x10C4 // #131620 Card Surface
+#define COLOR_CARD_BORDER   0x2988 // #283044 Card Edge
+#define COLOR_CARD_HEADER   0x18E5 // #1A1E2C Window Titlebar
+#define COLOR_CODE_BG       0x0841 // #07080C Terminal Monospace Box
+#define COLOR_TERRACOTTA    0xE3EC // #E07A5F Anthropic Terracotta
+#define COLOR_AMBER_GLOW    0xFC41 // #F59E0B Warning / Active Amber
+#define COLOR_AMBER_HI      0xFE69 // #FCD34D Bright Amber
 #define COLOR_TEXT_WHITE    0xFFFF // #FFFFFF Crisp White
-#define COLOR_TEXT_MUTED    0x9CF3 // #9CA3AF Slate gray text
-#define COLOR_GREEN_BTN     0x04C9 // #059669 Emerald 600
-#define COLOR_GREEN_BORDER  0x1571 // #10B981 Emerald 500
-#define COLOR_GREEN_MINT    0xA7F3 // #A7F3D0 Light Mint text
-#define COLOR_GREEN_BG      0x0A24 // #0A2416 Dark Emerald surface
-#define COLOR_RED_BTN       0xB8E3 // #DC2626 Rose 600
-#define COLOR_RED_BORDER    0xF9D0 // #F43F5E Rose 500
-#define COLOR_RED_ROSE      0xFDEE // #FECDD3 Light Rose text
-#define COLOR_RED_BG        0x3000 // Dark Red surface
-#define COLOR_CYAN_ACCENT   0x05BD // #06B6D4 Cyan 500
-#define COLOR_CYAN_BG       0x01E8 // #062836 Dark Cyan surface
+#define COLOR_TEXT_MUTED    0x9537 // #94A3B8 Slate Gray
+#define COLOR_TEXT_DIM      0x63B1 // #64748B Dark Slate
+
+// Buttons (Emerald & Crimson Bevel)
+#define COLOR_GREEN_BTN     0x0267 // #064E3B Deep Emerald Surface
+#define COLOR_GREEN_HI      0x36B3 // #34D399 Bright Emerald Highlight
+#define COLOR_GREEN_BORDER  0x15D0 // #10B981 Emerald Border
+#define COLOR_GREEN_MINT    0xA7F3 // #A7F3D0 Light Mint Text
+
+#define COLOR_RED_BTN       0x4081 // #450A0A Deep Crimson Surface
+#define COLOR_RED_HI        0xFB8E // #F87171 Bright Rose Highlight
+#define COLOR_RED_BORDER    0xF228 // #EF4444 Crimson Border
+#define COLOR_RED_ROSE      0xFDEE // #FECDD3 Light Rose Text
+
+// Accent Cyber Colors
+#define COLOR_CYAN_ACCENT   0x05BD // #06B6D4 Electric Cyan
+#define COLOR_CYAN_HI       0x677F // #67E8F9 Bright Cyan
+#define COLOR_CYAN_BG       0x0989 // #082F49 Deep Cyan Surface
+#define COLOR_PURPLE_ACCENT 0x8AEF // #8B5CF6 Violet
+#define COLOR_PURPLE_BG     0x2889 // #2E1065 Deep Violet Surface
+
+// Window Dots
+#define COLOR_DOT_RED       0xFAD5 // #FF5F56
+#define COLOR_DOT_YELLOW    0xFDE5 // #FFBD2E
+#define COLOR_DOT_GREEN     0x2647 // #27C93F
 
 // Touch button layout (320 x 240) - 68px ergonomic height
 static const int BTN_Y = 162;
@@ -177,39 +213,120 @@ void beep(int ms = 40) {
   }
 }
 
+void drawSpark(int cx, int cy, int r, uint16_t color) {
+  int r3 = (r * 3) / 10;
+  if (r3 < 1) r3 = 1;
+  tft.fillTriangle(cx, cy - r, cx - r3, cy, cx + r3, cy, color);
+  tft.fillTriangle(cx, cy + r, cx - r3, cy, cx + r3, cy, color);
+  tft.fillTriangle(cx - r, cy, cx, cy - r3, cx, cy + r3, color);
+  tft.fillTriangle(cx + r, cy, cx, cy - r3, cx, cy + r3, color);
+}
+
+void drawChevron(int x, int y, int h, uint16_t color) {
+  int midY = y + h / 2;
+  tft.drawLine(x, y, x + 5, midY, color);
+  tft.drawLine(x, y + 1, x + 5, midY + 1, color);
+  tft.drawLine(x + 5, midY, x, y + h, color);
+  tft.drawLine(x + 5, midY + 1, x, y + h + 1, color);
+}
+
 void drawStatusBar() {
-  tft.fillRect(0, 0, 320, 26, COLOR_HEADER_BG);
-  tft.drawFastHLine(0, 26, 320, COLOR_HEADER_LINE);
+  tft.fillRect(0, 0, 320, 24, COLOR_HEADER_BG);
+  tft.drawFastHLine(0, 24, 320, COLOR_HEADER_LINE);
 
-  // Status Dot
-  uint16_t dotColor;
-  if (currentState == STATE_PROMPT) dotColor = COLOR_AMBER_GLOW;
-  else if (currentState == STATE_THINKING) dotColor = COLOR_CYAN_ACCENT;
-  else if (currentState == STATE_ANSWERED) dotColor = COLOR_GREEN_BTN;
-  else if (currentState == STATE_EXPIRED) dotColor = COLOR_RED_BTN;
-  else dotColor = deviceConnected ? COLOR_GREEN_BTN : COLOR_AMBER_GLOW;
+  // Left Brand: Anthropic Spark + Title
+  drawSpark(13, 12, 5, COLOR_TERRACOTTA);
+  tft.setTextColor(COLOR_TEXT_WHITE, COLOR_HEADER_BG);
+  tft.drawString("CLAUDE DECK", 23, 6);
 
-  tft.fillCircle(14, 13, 3, dotColor);
+  // Center Mode Pill
+  const char* modeText = "[ STANDBY ]";
+  uint16_t modeColor = COLOR_GREEN_HI;
 
-  // Badge / Title Text
-  tft.setTextColor(COLOR_TERRACOTTA, COLOR_HEADER_BG);
-  tft.setTextSize(1);
   if (currentState == STATE_PROMPT) {
-    tft.drawString(promptBadge.c_str(), 26, 7);
+    modeText = "[ APPROVAL ]";
+    modeColor = COLOR_AMBER_GLOW;
   } else if (currentState == STATE_THINKING) {
-    tft.drawString("[THINKING CoT]", 26, 7);
-  } else {
-    tft.drawString("CLAUDE DECK", 26, 7);
+    modeText = "[ REASONING ]";
+    modeColor = COLOR_CYAN_HI;
+  } else if (currentState == STATE_QUESTION) {
+    modeText = "[ QUESTION ]";
+    modeColor = COLOR_CYAN_HI;
+  } else if (currentState == STATE_ANSWERED) {
+    modeText = "[ APPROVED ]";
+    modeColor = COLOR_GREEN_HI;
+  } else if (currentState == STATE_EXPIRED) {
+    modeText = "[ TIMEOUT ]";
+    modeColor = COLOR_RED_HI;
   }
 
-  // Right BLE Status
-  if (deviceConnected) {
-    tft.setTextColor(COLOR_GREEN_BTN, COLOR_HEADER_BG);
-    tft.drawString("BLE 100% | 5V", 228, 7);
-  } else {
-    tft.setTextColor(COLOR_AMBER_GLOW, COLOR_HEADER_BG);
-    tft.drawString("BLE: PAIRING", 232, 7);
+  int pillW = 88;
+  int pillX = 160 - pillW / 2;
+  tft.fillRoundRect(pillX, 3, pillW, 18, 4, COLOR_CARD_BG);
+  tft.drawRoundRect(pillX, 3, pillW, 18, 4, COLOR_CARD_BORDER);
+  tft.setTextColor(modeColor, COLOR_CARD_BG);
+  tft.drawCenterString(modeText, 160, 5);
+
+  // Right Telemetry: Signal Bars & Battery
+  int sigX = 264;
+  for (int i = 0; i < 4; i++) {
+    int h = 3 + i * 2;
+    uint16_t c = (deviceConnected) ? COLOR_GREEN_HI : COLOR_CARD_BORDER;
+    tft.fillRect(sigX + i * 4, 16 - h, 2, h, c);
   }
+
+  // Battery icon
+  int batX = 284;
+  tft.drawRect(batX, 8, 16, 9, COLOR_TEXT_MUTED);
+  tft.fillRect(batX + 16, 10, 2, 5, COLOR_TEXT_MUTED);
+  tft.fillRect(batX + 2, 10, 12, 5, deviceConnected ? COLOR_GREEN_HI : COLOR_AMBER_GLOW);
+  tft.setTextColor(deviceConnected ? COLOR_GREEN_HI : COLOR_AMBER_GLOW, COLOR_HEADER_BG);
+  tft.drawString("5V", batX + 20, 6);
+}
+
+void drawTactileButton(int x, int y, int w, int h, bool isAllow, const String& label, const char* sublabel, bool pressed = false) {
+  if (pressed) {
+    tft.fillRoundRect(x, y, w, h, 8, TFT_WHITE);
+    tft.drawRoundRect(x, y, w, h, 8, isAllow ? COLOR_GREEN_HI : COLOR_RED_HI);
+    tft.setTextColor(TFT_BLACK, TFT_WHITE);
+    tft.drawCenterString(label.c_str(), x + w / 2, y + 16);
+    tft.drawCenterString(sublabel, x + w / 2, y + 40);
+    return;
+  }
+
+  uint16_t surfColor = isAllow ? COLOR_GREEN_BTN : COLOR_RED_BTN;
+  uint16_t hiColor = isAllow ? COLOR_GREEN_HI : COLOR_RED_HI;
+  uint16_t borderColor = isAllow ? COLOR_GREEN_BORDER : COLOR_RED_BORDER;
+  uint16_t subColor = isAllow ? COLOR_GREEN_MINT : COLOR_RED_ROSE;
+
+  // Button body
+  tft.fillRoundRect(x, y, w, h, 8, surfColor);
+  tft.drawRoundRect(x, y, w, h, 8, borderColor);
+
+  // Top tactile bevel line (2px)
+  tft.drawFastHLine(x + 8, y + 2, w - 16, hiColor);
+  tft.drawFastHLine(x + 10, y + 3, w - 20, hiColor);
+
+  // Vector Icon (Checkmark or Cross)
+  int cx = x + 24;
+  int cy = y + h / 2;
+  if (isAllow) {
+    for (int d = -1; d <= 1; d++) {
+      tft.drawLine(cx - 9, cy + d, cx - 3, cy + 7 + d, hiColor);
+      tft.drawLine(cx - 3, cy + 7 + d, cx + 9, cy - 7 + d, hiColor);
+    }
+  } else {
+    for (int d = -1; d <= 1; d++) {
+      tft.drawLine(cx - 7, cy - 7 + d, cx + 7, cy + 7 + d, hiColor);
+      tft.drawLine(cx - 7, cy + 7 + d, cx + 7, cy - 7 + d, hiColor);
+    }
+  }
+
+  // Two-tier text labels
+  tft.setTextColor(COLOR_TEXT_WHITE, surfColor);
+  tft.drawString(label.c_str(), x + 44, y + 15);
+  tft.setTextColor(subColor, surfColor);
+  tft.drawString(sublabel, x + 44, y + 39);
 }
 
 // Draw a UTF-8 aware wrapped string. This intentionally works on the displayed
@@ -254,108 +371,192 @@ void drawWrappedText(const String& text, int x, int y, int maxWidth, int lineHei
 void renderUI() {
   drawStatusBar();
 
-  // Content background (Deep obsidian warm dark)
-  tft.fillRect(0, 27, 320, 213, COLOR_BG);
+  // Content background (Ultra-deep Obsidian)
+  tft.fillRect(0, 25, 320, 215, COLOR_BG);
 
   if (currentState == STATE_IDLE) {
     setLED(false, true, false); // Green
 
-    // Standby Badge / Icon (54x54)
-    tft.fillRoundRect(133, 50, 54, 54, 14, COLOR_GREEN_BG);
-    tft.drawRoundRect(133, 50, 54, 54, 14, COLOR_GREEN_BORDER);
-    tft.setTextColor(COLOR_GREEN_BORDER, COLOR_GREEN_BG);
-    tft.drawCenterString("OK", 160, 64, 4);
+    // 1. Center Card Container (8, 28, 304, 134)
+    int cx = 8, cy = 28, cw = 304, ch = 134;
+    tft.fillRoundRect(cx, cy, cw, ch, 8, COLOR_CARD_BG);
+    tft.drawRoundRect(cx, cy, cw, ch, 8, COLOR_CARD_BORDER);
 
-    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_BG);
-    tft.drawCenterString("Claude Code 待命就绪", 160, 116, 2);
+    // Tech Corner Brackets
+    uint16_t bracketC = 0x31C8;
+    int blen = 8;
+    tft.drawFastHLine(cx + 4, cy + 4, blen, bracketC);
+    tft.drawFastVLine(cx + 4, cy + 4, blen, bracketC);
+    tft.drawFastHLine(cx + cw - 4 - blen, cy + 4, blen, bracketC);
+    tft.drawFastVLine(cx + cw - 4, cy + 4, blen, bracketC);
+    tft.drawFastHLine(cx + 4, cy + ch - 4, blen, bracketC);
+    tft.drawFastVLine(cx + 4, cy + ch - 4 - blen, bracketC);
+    tft.drawFastHLine(cx + cw - 4 - blen, cy + ch - 4, blen, bracketC);
+    tft.drawFastVLine(cx + cw - 4, cy + ch - 4 - blen, bracketC);
 
-    tft.setTextColor(COLOR_TEXT_MUTED, COLOR_BG);
-    tft.drawCenterString("把窗口放后台去吧 · 遇到询问副屏会提醒", 160, 144, 1);
+    // Center Radar Circles & Claude Spark
+    int ecx = 160, ecy = 70;
+    tft.drawCircle(ecx, ecy, 30, 0x11E4);
+    tft.drawCircle(ecx, ecy, 22, COLOR_GREEN_BTN);
+    // 4 radar ticks
+    tft.drawFastVLine(ecx, ecy - 34, 6, COLOR_GREEN_HI);
+    tft.drawFastVLine(ecx, ecy + 28, 6, COLOR_GREEN_HI);
+    tft.drawFastHLine(ecx - 34, ecy, 6, COLOR_GREEN_HI);
+    tft.drawFastHLine(ecx + 28, ecy, 6, COLOR_GREEN_HI);
 
-    tft.setTextColor(COLOR_CARD_BORDER, COLOR_BG);
-    tft.drawCenterString("STANDBY · BLE CONNECTED · FAIL-SAFE DENY", 160, 200, 1);
+    // Inner glowing core
+    tft.fillCircle(ecx, ecy, 13, COLOR_GREEN_BTN);
+    drawSpark(ecx, ecy, 8, COLOR_GREEN_HI);
+
+    // Hero title & subtitle
+    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_CARD_BG);
+    tft.drawCenterString("Claude Code 终端待命", 160, 108);
+
+    tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD_BG);
+    tft.drawCenterString("物理安全守护已激活 · 遇高危调用副屏提醒", 160, 132);
+
+    // 2. Bottom 3-Card Telemetry Dock (Y: 168, H: 64)
+    int dockY = 168;
+    int dockH = 64;
+    int cardW = 96;
+
+    // Card 1: BLE Link
+    int mx1 = 8;
+    tft.fillRoundRect(mx1, dockY, cardW, dockH, 6, COLOR_CARD_BG);
+    tft.drawRoundRect(mx1, dockY, cardW, dockH, 6, COLOR_CARD_BORDER);
+    tft.setTextColor(COLOR_TEXT_DIM, COLOR_CARD_BG);
+    tft.drawString("BLE LINK", mx1 + 10, dockY + 8);
+    tft.fillRoundRect(mx1 + 8, dockY + 26, cardW - 16, 26, 4, COLOR_GREEN_BTN);
+    tft.setTextColor(COLOR_GREEN_HI, COLOR_GREEN_BTN);
+    tft.drawCenterString(deviceConnected ? "ONLINE" : "WAITING", mx1 + cardW / 2, dockY + 32);
+
+    // Card 2: Policy
+    int mx2 = mx1 + cardW + 8;
+    tft.fillRoundRect(mx2, dockY, cardW, dockH, 6, COLOR_CARD_BG);
+    tft.drawRoundRect(mx2, dockY, cardW, dockH, 6, COLOR_CARD_BORDER);
+    tft.setTextColor(COLOR_TEXT_DIM, COLOR_CARD_BG);
+    tft.drawString("POLICY", mx2 + 10, dockY + 8);
+    tft.fillRoundRect(mx2 + 8, dockY + 26, cardW - 16, 26, 4, 0x4101);
+    tft.setTextColor(COLOR_AMBER_HI, 0x4101);
+    tft.drawCenterString("FAIL-SAFE", mx2 + cardW / 2, dockY + 32);
+
+    // Card 3: Timeout
+    int mx3 = mx2 + cardW + 8;
+    tft.fillRoundRect(mx3, dockY, cardW, dockH, 6, COLOR_CARD_BG);
+    tft.drawRoundRect(mx3, dockY, cardW, dockH, 6, COLOR_CARD_BORDER);
+    tft.setTextColor(COLOR_TEXT_DIM, COLOR_CARD_BG);
+    tft.drawString("TIMEOUT", mx3 + 10, dockY + 8);
+    tft.fillRoundRect(mx3 + 8, dockY + 26, cardW - 16, 26, 4, COLOR_CYAN_BG);
+    tft.setTextColor(COLOR_CYAN_HI, COLOR_CYAN_BG);
+    tft.drawCenterString("120s AUTO", mx3 + cardW / 2, dockY + 32);
   }
   else if (currentState == STATE_THINKING) {
     setLED(false, false, true); // Blue
 
-    // Thinking Badge / Icon
-    tft.fillRoundRect(133, 50, 54, 54, 14, COLOR_CYAN_BG);
-    tft.drawRoundRect(133, 50, 54, 54, 14, COLOR_CYAN_ACCENT);
-    tft.setTextColor(COLOR_CYAN_ACCENT, COLOR_CYAN_BG);
-    tft.drawCenterString("AI", 160, 64, 4);
+    int cx = 8, cy = 28, cw = 304, ch = 198;
+    tft.fillRoundRect(cx, cy, cw, ch, 8, COLOR_CARD_BG);
+    tft.drawRoundRect(cx, cy, cw, ch, 8, COLOR_CARD_BORDER);
 
-    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_BG);
-    tft.drawCenterString("Claude 正在深度思考中...", 160, 116, 2);
+    // Center Tech Gyroscope / Neural Rings
+    int ecx = 160, ecy = 78;
+    tft.drawCircle(ecx, ecy, 36, 0x09CB);
+    tft.drawCircle(ecx, ecy, 26, COLOR_CYAN_BG);
+    tft.fillCircle(ecx, ecy, 16, COLOR_CYAN_BG);
+    tft.drawCircle(ecx, ecy, 16, COLOR_CYAN_ACCENT);
+    drawSpark(ecx, ecy, 9, COLOR_CYAN_HI);
 
-    tft.setTextColor(COLOR_TEXT_MUTED, COLOR_BG);
-    drawWrappedText(promptDesc, 20, 144, 280, 16, 2);
+    // 8 orbital points
+    const float angles[8] = { 0, 45, 90, 135, 180, 225, 270, 315 };
+    for (int i = 0; i < 8; i++) {
+      float rad = angles[i] * 3.14159f / 180.0f;
+      int ox = ecx + (int)(cos(rad) * 36);
+      int oy = ecy + (int)(sin(rad) * 36);
+      tft.fillCircle(ox, oy, 2, COLOR_CYAN_ACCENT);
+    }
 
-    tft.setTextColor(COLOR_CYAN_ACCENT, COLOR_BG);
-    tft.drawCenterString("THINKING · PLEASE WAIT", 160, 200, 1);
+    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_CARD_BG);
+    tft.drawCenterString("Claude 正在深度思考中...", 160, 124);
+
+    // Description Box
+    int tbx = cx + 12, tby = 148, tbw = cw - 24, tbh = 44;
+    tft.fillRoundRect(tbx, tby, tbw, tbh, 4, COLOR_CODE_BG);
+    tft.drawRoundRect(tbx, tby, tbw, tbh, 4, 0x09CB);
+    tft.fillRect(tbx, tby, 3, tbh, COLOR_CYAN_ACCENT);
+    tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CODE_BG);
+    drawWrappedText(promptDesc, tbx + 8, tby + 6, tbw - 14, 16, 2);
+
+    // Scanning bar
+    tft.setTextColor(COLOR_CYAN_ACCENT, COLOR_CARD_BG);
+    tft.drawString("■ ■ ■ ■ ■ □ □ □", cx + 12, 202);
+    tft.setTextColor(COLOR_TEXT_DIM, COLOR_CARD_BG);
+    tft.drawRightString("REASONING IN PROGRESS", cx + cw - 12, 202);
   }
   else if (currentState == STATE_PROMPT) {
     setLED(true, true, false); // Yellow / Amber
 
-    // Middle Card Container (304 x 124, r=8)
-    tft.fillRoundRect(8, 32, 304, 124, 8, COLOR_CARD_BG);
-    tft.drawRoundRect(8, 32, 304, 124, 8, COLOR_CARD_BORDER);
+    // 1. Middle Card Container (8, 28, 304, 126, r=8)
+    int cx = 8, cy = 28, cw = 304, ch = 126;
+    tft.fillRoundRect(cx, cy, cw, ch, 8, COLOR_CARD_BG);
+    tft.drawRoundRect(cx, cy, cw, ch, 8, COLOR_CARD_BORDER);
 
-    // Prompt Title with Accent
-    tft.setTextColor(COLOR_AMBER_GLOW, COLOR_CARD_BG);
-    tft.drawString(promptTitle.c_str(), 16, 40, 2);
+    // Window Header Bar with macOS dots
+    tft.fillRoundRect(cx, cy, cw, 22, 8, COLOR_CARD_HEADER);
+    tft.fillRect(cx, cy + 14, cw, 8, COLOR_CARD_HEADER);
+    tft.drawFastHLine(cx, cy + 22, cw, COLOR_CARD_BORDER);
 
-    // Prompt Category Tag Pill
-    tft.fillRoundRect(236, 38, 68, 16, 3, COLOR_HEADER_BG);
-    tft.drawRoundRect(236, 38, 68, 16, 3, COLOR_CARD_BORDER);
-    tft.setTextColor(COLOR_TERRACOTTA, COLOR_HEADER_BG);
-    tft.drawCenterString(promptTag.c_str(), 270, 41, 1);
+    tft.fillCircle(cx + 12, cy + 11, 3, COLOR_DOT_RED);
+    tft.fillCircle(cx + 22, cy + 11, 3, COLOR_DOT_YELLOW);
+    tft.fillCircle(cx + 32, cy + 11, 3, COLOR_DOT_GREEN);
 
-    // Terminal Inner Codebox (288 x 56, r=4)
-    tft.fillRoundRect(16, 58, 288, 56, 4, COLOR_CARD_INNER);
-    tft.fillRect(16, 58, 3, 56, COLOR_AMBER_GLOW);
+    // Prompt Header title
+    tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD_HEADER);
+    tft.drawString(promptTitle.c_str(), cx + 42, cy + 5);
 
-    // Inside Codebox Text (UTF-8 safe wrapping)
-    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_CARD_INNER);
-    drawWrappedText(promptDesc, 26, 63, 272, 16, 3);
+    // Category Tag Pill on top right
+    int tagW = 76;
+    int tagX = cx + cw - tagW - 4;
+    tft.fillRoundRect(tagX, cy + 3, tagW, 16, 3, 0x4101);
+    tft.drawRoundRect(tagX, cy + 3, tagW, 16, 3, COLOR_AMBER_GLOW);
+    tft.setTextColor(COLOR_AMBER_HI, 0x4101);
+    tft.drawCenterString(promptTag.c_str(), tagX + tagW / 2, cy + 4);
 
-    // Card Footer: Sub-hint + Timeout Notice
+    // Inner Terminal Codebox (16, 54, 288, 68)
+    int tbx = cx + 8, tby = cy + 28, tbw = cw - 16, tbh = 68;
+    tft.fillRoundRect(tbx, tby, tbw, tbh, 4, COLOR_CODE_BG);
+    tft.drawRoundRect(tbx, tby, tbw, tbh, 4, 0x1946);
+    tft.fillRect(tbx, tby, 3, tbh, COLOR_AMBER_GLOW);
+
+    // Inside text
+    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_CODE_BG);
+    drawWrappedText(promptDesc, tbx + 8, tby + 8, tbw - 14, 18, 3);
+
+    // Footer notice
+    drawSpark(cx + 14, cy + ch - 12, 4, COLOR_TERRACOTTA);
     tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD_BG);
-    tft.drawString("轻触按键物理授权", 16, 128, 1);
+    tft.drawString("物理双键审批把关", cx + 24, cy + ch - 18);
+
     tft.setTextColor(COLOR_TERRACOTTA, COLOR_CARD_BG);
-    tft.drawRightString("120s 超时熔断", 300, 128, 1);
+    tft.drawRightString("⚡ 120s 超时熔断", cx + cw - 10, cy + ch - 18);
 
-    // Button 1 (Allow / Left) - Emerald Green 68px
-    tft.fillRoundRect(BTN1_X, BTN_Y, BTN1_W, BTN_H, 10, COLOR_GREEN_BTN);
-    tft.drawRoundRect(BTN1_X, BTN_Y, BTN1_W, BTN_H, 10, COLOR_GREEN_BORDER);
-    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_GREEN_BTN);
-    tft.drawCenterString(option1Text.c_str(), BTN1_X + BTN1_W / 2, BTN_Y + 16, 2);
-    tft.setTextColor(COLOR_GREEN_MINT, COLOR_GREEN_BTN);
-    tft.drawCenterString("ALLOW · TAP", BTN1_X + BTN1_W / 2, BTN_Y + 44, 1);
-
-    // Button 2 (Reject / Right) - Rose Red 68px
-    tft.fillRoundRect(BTN2_X, BTN_Y, BTN2_W, BTN_H, 10, COLOR_RED_BTN);
-    tft.drawRoundRect(BTN2_X, BTN_Y, BTN2_W, BTN_H, 10, COLOR_RED_BORDER);
-    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_RED_BTN);
-    tft.drawCenterString(option2Text.c_str(), BTN2_X + BTN2_W / 2, BTN_Y + 16, 2);
-    tft.setTextColor(COLOR_RED_ROSE, COLOR_RED_BTN);
-    tft.drawCenterString("REJECT · STOP", BTN2_X + BTN2_W / 2, BTN_Y + 44, 1);
+    // 2. Buttons
+    drawTactileButton(BTN1_X, BTN_Y, BTN1_W, BTN_H, true, option1Text, "[ CONFIRM ]");
+    drawTactileButton(BTN2_X, BTN_Y, BTN2_W, BTN_H, false, option2Text, "[ ABORT ]");
   }
   else if (currentState == STATE_QUESTION) {
     setLED(false, false, true); // Blue
 
-    // Header chip: question category / short label.
-    tft.fillRoundRect(8, 32, 304, 22, 6, COLOR_CARD_BG);
-    tft.drawRoundRect(8, 32, 304, 22, 6, COLOR_CARD_BORDER);
-    tft.setTextColor(COLOR_TERRACOTTA, COLOR_CARD_BG);
-    tft.drawString(questionHeaderText.c_str(), 16, 36, 1);
-    tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD_BG);
-    tft.drawRightString("CLAUDE QUESTION", 304, 36, 1);
+    // Header Question Card (8, 28, 304, 54)
+    tft.fillRoundRect(8, 28, 304, 54, 8, COLOR_CARD_BG);
+    tft.drawRoundRect(8, 28, 304, 54, 8, COLOR_CARD_BORDER);
 
-    // Question body.
-    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_BG);
-    drawWrappedText(questionText, 12, 62, 296, 18, 2);
+    drawSpark(18, 38, 4, COLOR_CYAN_HI);
+    tft.setTextColor(COLOR_CYAN_HI, COLOR_CARD_BG);
+    tft.drawString(questionHeaderText.c_str(), 28, 32);
 
-    // Option rows: two per page, each with label + description.
+    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_CARD_BG);
+    drawWrappedText(questionText, 16, 52, 288, 16, 2);
+
+    // Option rows
     uint8_t pageCount = (questionOptionCount + QUESTION_PER_PAGE - 1) / QUESTION_PER_PAGE;
     uint8_t start = questionPage * QUESTION_PER_PAGE;
     for (int row = 0; row < QUESTION_PER_PAGE; ++row) {
@@ -363,67 +564,111 @@ void renderUI() {
       int y = (row == 0) ? QUESTION_ROW1_Y : QUESTION_ROW2_Y;
 
       if (index >= questionOptionCount) {
-        tft.fillRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 10, COLOR_BG);
+        tft.fillRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 8, COLOR_BG);
         continue;
       }
 
-      tft.fillRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 10, COLOR_CARD_BG);
-      tft.drawRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 10, COLOR_CYAN_ACCENT);
+      tft.fillRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 8, COLOR_CARD_BG);
+      tft.drawRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 8, (index == 0) ? COLOR_CYAN_ACCENT : COLOR_CARD_BORDER);
+
+      // Number badge
+      tft.fillRoundRect(QUESTION_ROW_X + 8, y + 10, 24, 32, 4, (index == 0) ? COLOR_CYAN_BG : COLOR_CARD_HEADER);
+      tft.drawRoundRect(QUESTION_ROW_X + 8, y + 10, 24, 32, 4, (index == 0) ? COLOR_CYAN_ACCENT : COLOR_CARD_BORDER);
+      char numBuf[4];
+      snprintf(numBuf, sizeof(numBuf), "%d", index + 1);
+      tft.setTextColor((index == 0) ? COLOR_CYAN_HI : COLOR_TEXT_MUTED, (index == 0) ? COLOR_CYAN_BG : COLOR_CARD_HEADER);
+      tft.drawCenterString(numBuf, QUESTION_ROW_X + 20, y + 18);
+
+      // Label & Description
       tft.setTextColor(COLOR_TEXT_WHITE, COLOR_CARD_BG);
-      tft.drawString(questionOptionLabels[index].c_str(), QUESTION_ROW_X + 14, y + 8, 2);
+      tft.drawString(questionOptionLabels[index].c_str(), QUESTION_ROW_X + 40, y + 10);
       tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD_BG);
-      drawWrappedText(questionOptionDescriptions[index], QUESTION_ROW_X + 14, y + 30, 268, 14, 1);
+      drawWrappedText(questionOptionDescriptions[index], QUESTION_ROW_X + 40, y + 30, QUESTION_ROW_W - 65, 14, 1);
+
+      // Right Chevron
+      drawChevron(QUESTION_ROW_X + QUESTION_ROW_W - 16, y + 18, 14, (index == 0) ? COLOR_CYAN_ACCENT : COLOR_CARD_BORDER);
     }
 
-    // Pagination controls.
+    // Scrollbar if > 1 page
     if (pageCount > 1) {
-      tft.fillRoundRect(8, QUESTION_NAV_Y, 74, 24, 8, COLOR_CARD_BG);
-      tft.drawRoundRect(8, QUESTION_NAV_Y, 74, 24, 8, COLOR_CARD_BORDER);
-      tft.setTextColor(COLOR_TEXT_WHITE, COLOR_CARD_BG);
-      tft.drawCenterString("◀ PREV", 45, QUESTION_NAV_Y + 6, 1);
+      tft.fillRoundRect(SCROLLBAR_X, SCROLLBAR_Y, SCROLLBAR_W, SCROLLBAR_H, 6, COLOR_CARD_BG);
+      tft.drawRoundRect(SCROLLBAR_X, SCROLLBAR_Y, SCROLLBAR_W, SCROLLBAR_H, 6, COLOR_CARD_BORDER);
+      int thumbH = max(24, SCROLLBAR_H / pageCount);
+      int maxThumbY = SCROLLBAR_H - thumbH;
+      int thumbY = SCROLLBAR_Y + (questionPage * maxThumbY) / (pageCount - 1);
+      tft.fillRoundRect(SCROLLBAR_X + 2, thumbY + 2, SCROLLBAR_W - 4, thumbH - 4, 4, COLOR_CYAN_ACCENT);
 
-      tft.fillRoundRect(238, QUESTION_NAV_Y, 74, 24, 8, COLOR_CARD_BG);
-      tft.drawRoundRect(238, QUESTION_NAV_Y, 74, 24, 8, COLOR_CARD_BORDER);
-      tft.setTextColor(COLOR_TEXT_WHITE, COLOR_CARD_BG);
-      tft.drawCenterString("NEXT ▶", 275, QUESTION_NAV_Y + 6, 1);
+      // Nav buttons
+      tft.fillRoundRect(8, QUESTION_NAV_Y, 74, 24, 6, COLOR_CARD_BG);
+      tft.drawRoundRect(8, QUESTION_NAV_Y, 74, 24, 6, COLOR_CARD_BORDER);
+      tft.setTextColor(questionPage > 0 ? COLOR_TEXT_WHITE : COLOR_TEXT_DIM, COLOR_CARD_BG);
+      tft.drawCenterString("◀ PREV", 45, QUESTION_NAV_Y + 5);
 
-      char pageIndicator[12];
-      snprintf(pageIndicator, sizeof(pageIndicator), "%d / %d", questionPage + 1, pageCount);
+      tft.fillRoundRect(212, QUESTION_NAV_Y, 74, 24, 6, COLOR_CARD_BG);
+      tft.drawRoundRect(212, QUESTION_NAV_Y, 74, 24, 6, COLOR_CARD_BORDER);
+      tft.setTextColor(questionPage + 1 < pageCount ? COLOR_TEXT_WHITE : COLOR_TEXT_DIM, COLOR_CARD_BG);
+      tft.drawCenterString("NEXT ▶", 249, QUESTION_NAV_Y + 5);
+
+      char pageIndicator[16];
+      snprintf(pageIndicator, sizeof(pageIndicator), "第 %d / %d 页", questionPage + 1, pageCount);
       tft.setTextColor(COLOR_TEXT_MUTED, COLOR_BG);
-      tft.drawCenterString(pageIndicator, 160, QUESTION_NAV_Y + 6, 1);
-    }
-    else {
+      tft.drawCenterString(pageIndicator, 147, QUESTION_NAV_Y + 5);
+    } else {
       tft.setTextColor(COLOR_TEXT_MUTED, COLOR_BG);
-      tft.drawCenterString("轻触选项直接回答", 160, QUESTION_NAV_Y + 6, 1);
+      tft.drawCenterString("轻触选项序号直接作答", 160, QUESTION_NAV_Y + 5);
     }
   }
   else if (currentState == STATE_ANSWERED) {
     setLED(false, true, false); // Green
 
-    tft.fillRoundRect(133, 50, 54, 54, 14, COLOR_GREEN_BG);
-    tft.drawRoundRect(133, 50, 54, 54, 14, COLOR_GREEN_BORDER);
-    tft.setTextColor(COLOR_GREEN_BORDER, COLOR_GREEN_BG);
-    tft.drawCenterString("OK", 160, 64, 4);
+    int cx = 8, cy = 28, cw = 304, ch = 198;
+    tft.fillRoundRect(cx, cy, cw, ch, 8, COLOR_CARD_BG);
+    tft.drawRoundRect(cx, cy, cw, ch, 8, COLOR_CARD_BORDER);
 
-    tft.setTextColor(COLOR_GREEN_BORDER, COLOR_BG);
-    tft.drawCenterString("反馈已成功回传终端", 160, 116, 2);
+    // Radiant Success Emblem
+    int ecx = 160, ecy = 76;
+    tft.drawCircle(ecx, ecy, 36, 0x11E4);
+    tft.drawCircle(ecx, ecy, 26, COLOR_GREEN_BTN);
+    tft.fillCircle(ecx, ecy, 18, COLOR_GREEN_BTN);
+    for (int d = -1; d <= 1; d++) {
+      tft.drawLine(ecx - 8, ecy + d, ecx - 2, ecy + 6 + d, COLOR_GREEN_HI);
+      tft.drawLine(ecx - 2, ecy + 6 + d, ecx + 8, ecy - 6 + d, COLOR_GREEN_HI);
+    }
 
-    tft.setTextColor(COLOR_TEXT_MUTED, COLOR_BG);
-    tft.drawCenterString("Claude Code 终端已恢复执行", 160, 144, 1);
+    tft.setTextColor(COLOR_GREEN_HI, COLOR_CARD_BG);
+    tft.drawCenterString("授权已放行 · APPROVED", 160, 124);
+
+    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_CARD_BG);
+    tft.drawCenterString("反馈已成功回传终端", 160, 148);
+
+    tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD_BG);
+    tft.drawCenterString("Claude Code 终端已恢复执行", 160, 172);
   }
   else if (currentState == STATE_EXPIRED) {
     setLED(true, false, false); // Red
 
-    tft.fillRoundRect(133, 50, 54, 54, 14, COLOR_RED_BG);
-    tft.drawRoundRect(133, 50, 54, 54, 14, COLOR_RED_BORDER);
-    tft.setTextColor(COLOR_RED_BORDER, COLOR_RED_BG);
-    tft.drawCenterString("X", 160, 64, 4);
+    int cx = 8, cy = 28, cw = 304, ch = 198;
+    tft.fillRoundRect(cx, cy, cw, ch, 8, COLOR_CARD_BG);
+    tft.drawRoundRect(cx, cy, cw, ch, 8, COLOR_CARD_BORDER);
 
-    tft.setTextColor(COLOR_RED_BORDER, COLOR_BG);
-    tft.drawCenterString("请求已超时 (120s)", 160, 116, 2);
+    // Radiant Expired Emblem
+    int ecx = 160, ecy = 76;
+    tft.drawCircle(ecx, ecy, 36, 0x4081);
+    tft.drawCircle(ecx, ecy, 26, COLOR_RED_BTN);
+    tft.fillCircle(ecx, ecy, 18, COLOR_RED_BTN);
+    for (int d = -1; d <= 1; d++) {
+      tft.drawLine(ecx - 7, ecy - 7 + d, ecx + 7, ecy + 7 + d, COLOR_RED_HI);
+      tft.drawLine(ecx - 7, ecy + 7 + d, ecx + 7, ecy - 7 + d, COLOR_RED_HI);
+    }
 
-    tft.setTextColor(COLOR_TEXT_MUTED, COLOR_BG);
-    tft.drawCenterString("为保护工程安全，终端已自动拦截", 160, 144, 1);
+    tft.setTextColor(COLOR_RED_HI, COLOR_CARD_BG);
+    tft.drawCenterString("请求已超时 · 120s TIMEOUT", 160, 124);
+
+    tft.setTextColor(COLOR_TEXT_WHITE, COLOR_CARD_BG);
+    tft.drawCenterString("自动触发 Fail-Safe 熔断保护", 160, 148);
+
+    tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD_BG);
+    tft.drawCenterString("终端已安全拦截，代码库受控未受损", 160, 172);
   }
 }
 
@@ -471,12 +716,15 @@ class ServerCallbacks: public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* server) override {
     deviceConnected = true;
 
-    DeckMessage msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.type = DECK_MSG_STATUS;
-    strlcpy(msg.status, "connected", sizeof(msg.status));
-    if (uiQueue != nullptr) {
-      xQueueSend(uiQueue, &msg, 0);
+    DeckMessage* msg = allocateDeckMessage();
+    if (msg != nullptr && uiQueue != nullptr) {
+      msg->type = DECK_MSG_STATUS;
+      strlcpy(msg->status, "connected", sizeof(msg->status));
+      if (xQueueSend(uiQueue, &msg, 0) != pdTRUE) {
+        vPortFree(msg);
+      }
+    } else if (msg != nullptr) {
+      vPortFree(msg);
     }
   }
 
@@ -484,12 +732,15 @@ class ServerCallbacks: public NimBLEServerCallbacks {
     deviceConnected = false;
     NimBLEDevice::startAdvertising();
 
-    DeckMessage msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.type = DECK_MSG_STATUS;
-    strlcpy(msg.status, "idle", sizeof(msg.status));
-    if (uiQueue != nullptr) {
-      xQueueSend(uiQueue, &msg, 0);
+    DeckMessage* msg = allocateDeckMessage();
+    if (msg != nullptr && uiQueue != nullptr) {
+      msg->type = DECK_MSG_STATUS;
+      strlcpy(msg->status, "idle", sizeof(msg->status));
+      if (xQueueSend(uiQueue, &msg, 0) != pdTRUE) {
+        vPortFree(msg);
+      }
+    } else if (msg != nullptr) {
+      vPortFree(msg);
     }
   }
 };
@@ -499,24 +750,56 @@ void copyJsonString(JsonVariant source, char* dest, size_t destSize) {
   value.toCharArray(dest, destSize);
 }
 
+// Writes larger than the negotiated ATT MTU arrive from the host as several
+// sequential writes. Accumulate them here and parse once the JSON is complete.
+#define RX_BUFFER_MAX 2048
+#define RX_CHUNK_GAP_MS 200
+static std::vector<uint8_t> rxBuffer;
+static unsigned long lastRxChunkMillis = 0;
+
 class RxCallbacks: public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* pCharacteristic) override {
     std::string rxValue = pCharacteristic->getValue();
-    Serial.printf("[BLE] Received %d bytes: %s\n", rxValue.length(), rxValue.c_str());
+    Serial.printf("[BLE] Received %d bytes\n", rxValue.length());
 
     if (rxValue.length() == 0 || uiQueue == nullptr) {
       return;
     }
 
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, rxValue);
-    if (error) {
-      Serial.printf("[BLE JSON ERROR] %s\n", error.c_str());
+    // A long quiet gap after a partial frame means that burst is dead (a
+    // dropped chunk, or host restart); it can never complete, so drop it.
+    unsigned long now = millis();
+    if (!rxBuffer.empty() && (now - lastRxChunkMillis > RX_CHUNK_GAP_MS)) {
+      Serial.printf("[BLE RX] stale partial frame (%d bytes) discarded\n", rxBuffer.size());
+      rxBuffer.clear();
+    }
+    lastRxChunkMillis = now;
+
+    rxBuffer.insert(rxBuffer.end(), rxValue.begin(), rxValue.end());
+    if (rxBuffer.size() > RX_BUFFER_MAX) {
+      Serial.printf("[BLE RX] buffer overflow (%d bytes), dropping\n", rxBuffer.size());
+      rxBuffer.clear();
       return;
     }
 
-    DeckMessage msg;
-    memset(&msg, 0, sizeof(msg));
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, rxBuffer.data(), rxBuffer.size());
+    if (error == DeserializationError::IncompleteInput) {
+      // Chunked write in progress; wait for the remaining chunks.
+      Serial.printf("[BLE RX] incomplete JSON, waiting for remaining chunks (%d bytes so far)\n",
+                    rxBuffer.size());
+      return;
+    }
+    if (error) {
+      Serial.printf("[BLE JSON ERROR] %s (dropping %d bytes)\n", error.c_str(), rxBuffer.size());
+      rxBuffer.clear();
+      return;
+    }
+    rxBuffer.clear();
+
+    DeckMessage* pMsg = allocateDeckMessage();
+    if (pMsg == nullptr) return;
+    DeckMessage& msg = *pMsg;
 
     String type = doc["type"] | "prompt";
     if (type == "prompt") {
@@ -552,10 +835,13 @@ class RxCallbacks: public NimBLECharacteristicCallbacks {
       copyJsonString(doc["status"], msg.status, sizeof(msg.status));
       copyJsonString(doc["desc"], msg.desc, sizeof(msg.desc));
     } else {
+      vPortFree(pMsg);
       return;
     }
 
-    xQueueSend(uiQueue, &msg, 0);
+    if (uiQueue == nullptr || xQueueSend(uiQueue, &pMsg, 0) != pdTRUE) {
+      vPortFree(pMsg);
+    }
   }
 };
 
@@ -586,7 +872,7 @@ void handleQueuedMessage(DeckMessage& msg) {
     questionOptionCount = msg.optionCount;
     questionPage = 0;
 
-    for (uint8_t i = 0; i < 8; ++i) {
+    for (uint8_t i = 0; i < QUESTION_MAX_OPTIONS; ++i) {
       if (i < questionOptionCount) {
         questionOptionLabels[i] = msg.optionLabels[i];
         questionOptionDescriptions[i] = msg.optionDescriptions[i];
@@ -626,7 +912,7 @@ void handleQueuedMessage(DeckMessage& msg) {
 void setup() {
   Serial.begin(115200);
 
-  uiQueue = xQueueCreate(4, sizeof(DeckMessage));
+  uiQueue = xQueueCreate(8, sizeof(DeckMessage*));
 
   // Initialize LEDs
   pinMode(CYD_LED_R, OUTPUT);
@@ -637,6 +923,11 @@ void setup() {
   // Initialize Display
   tft.init();
   tft.setRotation(1); // Landscape 320x240
+
+  // Set Full GB2312 Chinese Font (6,763 characters, 0-byte RAM overhead, runs from Flash)
+  tft.setFont(&fonts::efontCN_14_b);
+  tft.setTextSize(1);
+  Serial.println("CJK font loaded: efontCN_14_b (Full GB2312 Bold)");
 
   // Force backlight ON
   pinMode(21, OUTPUT);
@@ -685,9 +976,12 @@ void setup() {
 }
 
 void loop() {
-  DeckMessage msg;
-  while (xQueueReceive(uiQueue, &msg, 0) == pdTRUE) {
-    handleQueuedMessage(msg);
+  DeckMessage* pMsg = nullptr;
+  while (uiQueue != nullptr && xQueueReceive(uiQueue, &pMsg, 0) == pdTRUE) {
+    if (pMsg != nullptr) {
+      handleQueuedMessage(*pMsg);
+      vPortFree(pMsg);
+    }
   }
 
   if (ts.touched()) {
@@ -706,13 +1000,31 @@ void loop() {
       uint8_t pageCount = (questionOptionCount + QUESTION_PER_PAGE - 1) / QUESTION_PER_PAGE;
       uint8_t start = questionPage * QUESTION_PER_PAGE;
 
+      // 1. 点击滚动条轨道直接翻页 (宽度18px，允许左右各扩容6px触摸热区)
+      if (pageCount > 1 && screenX >= (SCROLLBAR_X - 6) && screenX <= 318 && screenY >= SCROLLBAR_Y && screenY <= (SCROLLBAR_Y + SCROLLBAR_H)) {
+        int midY = SCROLLBAR_Y + SCROLLBAR_H / 2;
+        if (screenY < midY && questionPage > 0) {
+          questionPage--;
+          beep(30);
+          renderUI();
+        } else if (screenY >= midY && questionPage + 1 < pageCount) {
+          questionPage++;
+          beep(30);
+          renderUI();
+        }
+        goto endTouch;
+      }
+
+      // 2. 点击底部导航翻页按键
       if (pageCount > 1 && screenY >= QUESTION_NAV_Y && screenY <= 238) {
         if (screenX >= 8 && screenX <= 82 && questionPage > 0) {
           questionPage--;
+          beep(30);
           renderUI();
         }
-        else if (screenX >= 238 && screenX <= 312 && questionPage + 1 < pageCount) {
+        else if (screenX >= 212 && screenX <= 286 && questionPage + 1 < pageCount) {
           questionPage++;
+          beep(30);
           renderUI();
         }
         goto endTouch;
@@ -733,7 +1045,7 @@ void loop() {
         int y = (row == 0) ? QUESTION_ROW1_Y : QUESTION_ROW2_Y;
         tft.fillRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 10, TFT_WHITE);
         tft.setTextColor(TFT_BLACK, TFT_WHITE);
-        tft.drawString(questionOptionLabels[selectedOption].c_str(), QUESTION_ROW_X + 14, y + 8, 2);
+        tft.drawString(questionOptionLabels[selectedOption].c_str(), QUESTION_ROW_X + 14, y + 8);
         beep(60);
 
         if (sendSelectionToMac(selectedOption)) {
@@ -759,13 +1071,14 @@ void loop() {
       bool matched = false;
 
       // Check Button 1 (Allow / Left)
-      if (screenX >= (BTN1_X - 6) && screenX <= (BTN1_X + BTN1_W + 6) &&
+      // 右边界不扩展 +6，避免与 BTN2 左边界 [158,162] 4px 重叠
+      if (screenX >= (BTN1_X - 6) && screenX <= (BTN1_X + BTN1_W) &&
           screenY >= (BTN_Y - 10) && screenY <= 238) {
         allowed = true;
         matched = true;
       }
       // Check Button 2 (Reject / Right)
-      else if (screenX >= (BTN2_X - 6) && screenX <= (BTN2_X + BTN2_W + 6) &&
+      else if (screenX >= (BTN2_X) && screenX <= (BTN2_X + BTN2_W + 6) &&
                screenY >= (BTN_Y - 10) && screenY <= 238) {
         allowed = false;
         matched = true;
@@ -774,16 +1087,12 @@ void loop() {
       if (matched) {
         // Visual press flash feedback
         if (allowed) {
-          tft.fillRoundRect(BTN1_X, BTN_Y, BTN1_W, BTN_H, 10, TFT_WHITE);
-          tft.setTextColor(TFT_BLACK, TFT_WHITE);
-          tft.drawCenterString(option1Text.c_str(), BTN1_X + BTN1_W / 2, BTN_Y + 16, 2);
+          drawTactileButton(BTN1_X, BTN_Y, BTN1_W, BTN_H, true, option1Text, "[ CONFIRM ]", true);
           beep(40);
           delay(40);
           beep(50);
         } else {
-          tft.fillRoundRect(BTN2_X, BTN_Y, BTN2_W, BTN_H, 10, TFT_WHITE);
-          tft.setTextColor(TFT_BLACK, TFT_WHITE);
-          tft.drawCenterString(option2Text.c_str(), BTN2_X + BTN2_W / 2, BTN_Y + 16, 2);
+          drawTactileButton(BTN2_X, BTN_Y, BTN2_W, BTN_H, false, option2Text, "[ ABORT ]", true);
           beep(90);
         }
 

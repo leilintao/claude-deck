@@ -22,6 +22,13 @@ if OFFLINE_POLICY not in {"allow", "deny"}:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
+def split_ble_payload(data, chunk_size):
+    """Split a JSON payload into BLE-write-sized chunks (in order)."""
+    if chunk_size <= 0:
+        return [data]
+    return [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
+
+
 class DeckBridge:
     def __init__(self):
         self.client = None
@@ -97,6 +104,8 @@ class DeckBridge:
                     logging.warning("忽略未知 BLE payload: %r", text)
                     return
 
+            # request_id 必须转为小写匹配 uuid.hex
+            request_id = request_id.lower()
             waiter = self.pending_requests.get(request_id)
             if not waiter:
                 logging.warning("忽略过期/未匹配的 BLE 回复: %s", request_id)
@@ -107,23 +116,39 @@ class DeckBridge:
         except Exception as e:
             logging.error(f"解析触控数据失败: {e}")
 
+    def ble_chunk_size(self):
+        # macOS silently truncates write-without-response payloads larger than
+        # (ATT MTU - 3), and the firmware then drops the half-written JSON.
+        # Split into chunks with headroom for ATT/GATT overhead instead.
+        try:
+            mtu = int(self.client.mtu_size)
+        except Exception:
+            mtu = 512
+        return max(20, min(mtu - 8, 480))
+
     async def send_prompt(self, payload):
         if not self.client or not self.is_connected:
             return False
 
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        chunks = split_ble_payload(data, self.ble_chunk_size())
         try:
-            await self.client.write_gatt_char(CHAR_UUID_RX, data, response=False)
+            for chunk in chunks:
+                await self.client.write_gatt_char(CHAR_UUID_RX, chunk, response=False)
+            logging.info(
+                "BLE 推送成功: %d 字节 / %d 块 (块大小 %d)",
+                len(data), len(chunks), self.ble_chunk_size(),
+            )
             return True
         except Exception as e:
-            logging.error(f"BLE 写入失败: {e}")
+            logging.error(f"BLE 写入失败 ({len(data)} 字节 / {len(chunks)} 块): {e}")
             return False
 
     async def send_status(self, status, desc=""):
         payload = {"type": "status", "status": status, "desc": desc}
         await self.send_prompt(payload)
 
-    async def ask_question(self, header, question, options, timeout=120):
+    async def ask_question(self, header, question, options, timeout=30):
         """Show one Claude question on the deck and return the selected index."""
         if not self.is_connected:
             logging.warning("副屏未连接，Claude 问题回退到终端原生 UI")
@@ -141,7 +166,7 @@ class DeckBridge:
             "id": request_id,
             "header": header[:20],
             "question": question[:140],
-            "options": options[:8],
+            "options": options[:4],
         }
 
         try:
@@ -167,7 +192,7 @@ class DeckBridge:
         finally:
             self.pending_requests.pop(request_id, None)
 
-    async def ask_user(self, title, desc, options=["允许 (Y)", "拒绝 (N)"], badge="", tag="", timeout=120):
+    async def ask_user(self, title, desc, options=["允许 (Y)", "拒绝 (N)"], badge="", tag="", timeout=30):
         offline_reason = f"副屏离线，按 CLAUDE_DECK_OFFLINE_POLICY={OFFLINE_POLICY} 自动拒绝"
         if not self.is_connected:
             logging.warning("%s", offline_reason)
@@ -223,7 +248,39 @@ bridge = DeckBridge()
 
 class HookHTTPHandler(BaseHTTPRequestHandler):
     def do_POST(self):
-        if self.path == "/question":
+        if self.path == "/notify_question":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            try:
+                data = json.loads(body)
+                header = data.get("header", "QUESTION")
+                question = data.get("question", "")
+                options = data.get("options", [])
+
+                # 异步推送到 ESP32，不阻塞等待用户作答，两端同时显示
+                payload = {
+                    "type": "question",
+                    "id": uuid.uuid4().hex[:16],
+                    "header": header[:20],
+                    "question": question[:140],
+                    "options": options[:4],
+                }
+                logging.info(f"已异步推送 Claude 问题至副屏: {question}")
+                asyncio.run_coroutine_threadsafe(
+                    bridge.send_prompt(payload),
+                    bridge.loop,
+                )
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status": "ok"}')
+            except Exception as e:
+                logging.exception("处理通知问题失败")
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(str(e).encode("utf-8"))
+        elif self.path == "/question":
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length).decode("utf-8")
             try:
@@ -236,7 +293,7 @@ class HookHTTPHandler(BaseHTTPRequestHandler):
                     bridge.ask_question(header, question, options),
                     bridge.loop,
                 )
-                index = future.result(timeout=130)
+                index = future.result(timeout=35)
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -269,7 +326,7 @@ class HookHTTPHandler(BaseHTTPRequestHandler):
                     bridge.ask_user(title, desc, options, badge=badge, tag=tag),
                     bridge.loop,
                 )
-                decision, reason = future.result(timeout=130)
+                decision, reason = future.result(timeout=35)
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
