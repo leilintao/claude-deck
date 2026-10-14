@@ -133,7 +133,13 @@ cd ../host
   "hooks": {
     "PreToolUse": [
       {
-        "command": "/你的绝对路径/claude-deck/host/claude_hook.py"
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/你的绝对路径/claude-deck/host/claude_hook.py"
+          }
+        ]
       }
     ]
   }

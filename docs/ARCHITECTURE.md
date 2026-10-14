@@ -427,7 +427,17 @@ uv run pio run --target upload
 ```json
 {
   "hooks": {
-    "PreToolUse": "/Users/leilindao/PyProject/ESP/host/claude_hook.py"
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/leilindao/PyProject/ESP/host/claude_hook.py"
+          }
+        ]
+      }
+    ]
   }
 }
 ```
