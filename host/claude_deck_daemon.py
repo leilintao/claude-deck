@@ -188,11 +188,29 @@ class DeckBridge:
                 "index": clean_indexes[0],
             }
         waiter["event"].set()
+        await self.send_status("idle", "已在 Mac 终端完成选择", force=True)
         return True
 
     def question_is_pending(self, request_id):
         waiter = self.pending_requests.get(str(request_id).lower())
         return bool(waiter and waiter["kind"] == "question" and not waiter["event"].is_set())
+
+    async def answer_terminal_prompt(self, request_id, decision):
+        """Accept an allow/deny choice from an in-process terminal UI."""
+        waiter = self.pending_requests.get(str(request_id).lower())
+        if not waiter or waiter["kind"] != "prompt" or waiter["event"].is_set():
+            return False
+        if decision not in {"allow", "deny"}:
+            return False
+        waiter["response"] = decision
+        waiter["terminal_answer"] = True
+        waiter["event"].set()
+        await self.send_status(
+            "idle",
+            "已在 Mac 终端允许" if decision == "allow" else "已在 Mac 终端拒绝",
+            force=True,
+        )
+        return True
 
     def launch_terminal_question(self, request_id, header, question, options, timeout, multi_select):
         """Open a small companion terminal that races the physical deck."""
@@ -276,12 +294,25 @@ class DeckBridge:
         }
         return await self.send_prompt(payload)
 
-    async def ask_question(self, header, question, options, timeout=DEFAULT_TIMEOUT, multi_select=False):
+    async def ask_question(
+        self,
+        header,
+        question,
+        options,
+        timeout=DEFAULT_TIMEOUT,
+        multi_select=False,
+        launch_terminal=True,
+        request_id="",
+    ):
         """Show one Claude question on the deck and return the selected index."""
         async with self.approval_lock:
-            return await self._ask_question(header, question, options, timeout, multi_select)
+            return await self._ask_question(
+                header, question, options, timeout, multi_select, launch_terminal, request_id
+            )
 
-    async def _ask_question(self, header, question, options, timeout, multi_select):
+    async def _ask_question(
+        self, header, question, options, timeout, multi_select, launch_terminal, request_id
+    ):
         if not self.is_connected:
             logging.warning("副屏未连接，Claude 问题回退到终端原生 UI")
             return None
@@ -289,7 +320,10 @@ class DeckBridge:
         if len(options) < 2:
             return None
 
-        request_id = uuid.uuid4().hex[:16]
+        request_id = str(request_id or uuid.uuid4().hex[:16]).lower()
+        if not request_id.isalnum() or request_id in self.pending_requests:
+            logging.warning("无效或重复的问题请求 ID: %s", request_id)
+            return None
         waiter = {"event": asyncio.Event(), "response": None, "kind": "question", "multi_select": multi_select}
         self.pending_requests[request_id] = waiter
 
@@ -310,7 +344,8 @@ class DeckBridge:
                 return None
 
             logging.info(f"已推送 Claude 问题至副屏: [{request_id}] {question}")
-            self.launch_terminal_question(request_id, header, question, options, timeout, multi_select)
+            if launch_terminal:
+                self.launch_terminal_question(request_id, header, question, options, timeout, multi_select)
             try:
                 await asyncio.wait_for(waiter["event"].wait(), timeout=timeout)
                 response = waiter["response"]
@@ -334,17 +369,29 @@ class DeckBridge:
         finally:
             self.pending_requests.pop(request_id, None)
 
-    async def ask_user(self, title, desc, options=["允许 (Y)", "拒绝 (N)"], badge="", tag="", timeout=DEFAULT_TIMEOUT, request_key=""):
+    async def ask_user(
+        self,
+        title,
+        desc,
+        options=["允许 (Y)", "拒绝 (N)"],
+        badge="",
+        tag="",
+        timeout=DEFAULT_TIMEOUT,
+        request_key="",
+        request_id="",
+    ):
         async with self.approval_lock:
-            return await self._ask_user(title, desc, options, badge, tag, timeout, request_key)
+            return await self._ask_user(title, desc, options, badge, tag, timeout, request_key, request_id)
 
-    async def _ask_user(self, title, desc, options, badge, tag, timeout, request_key):
+    async def _ask_user(self, title, desc, options, badge, tag, timeout, request_key, request_id):
         offline_reason = f"副屏离线，按 CLAUDE_DECK_OFFLINE_POLICY={OFFLINE_POLICY} 自动拒绝"
         if not self.is_connected:
             logging.warning("%s", offline_reason)
             return self.offline_decision(), offline_reason
 
-        request_id = uuid.uuid4().hex[:16]
+        request_id = str(request_id or uuid.uuid4().hex[:16]).lower()
+        if not request_id.isalnum() or request_id in self.pending_requests:
+            return "deny", "无效或重复的审批请求 ID"
         waiter = {
             "event": asyncio.Event(),
             "response": None,
@@ -382,9 +429,17 @@ class DeckBridge:
                     decision = self.offline_decision()
                 reason = "副屏响应无效，按安全策略自动拒绝"
                 if decision == "deny":
-                    reason = "用户在 Claude-Deck 物理副屏上点击了拒绝"
+                    reason = (
+                        "用户在 Mac 终端拒绝了此操作"
+                        if waiter.get("terminal_answer")
+                        else "用户在 Claude-Deck 物理副屏上点击了拒绝"
+                    )
                 elif decision == "allow":
-                    reason = "用户在 Claude-Deck 物理副屏上点击了允许"
+                    reason = (
+                        "用户在 Mac 终端允许了此操作"
+                        if waiter.get("terminal_answer")
+                        else "用户在 Claude-Deck 物理副屏上点击了允许"
+                    )
                 logging.info(f"副屏用户做出选择: {decision}")
                 return decision, reason
             except asyncio.TimeoutError:
@@ -450,6 +505,25 @@ class HookHTTPHandler(BaseHTTPRequestHandler):
             except Exception:
                 logging.exception("处理终端问题选择失败")
                 self.send_error(400, "Invalid terminal question answer")
+        elif self.path == "/prompt_answer":
+            body = self.rfile.read(length).decode("utf-8")
+            try:
+                data = json.loads(body)
+                request_id = str(data.get("id") or "")
+                decision = str(data.get("decision") or "").lower()
+                future = asyncio.run_coroutine_threadsafe(
+                    bridge.answer_terminal_prompt(request_id, decision), bridge.loop
+                )
+                if not future.result(timeout=2):
+                    self.send_error(409, "Prompt is no longer pending")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"accepted": true}')
+            except Exception:
+                logging.exception("处理终端审批选择失败")
+                self.send_error(400, "Invalid terminal prompt answer")
         elif self.path == "/notify_question":
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length).decode("utf-8")
@@ -543,9 +617,19 @@ class HookHTTPHandler(BaseHTTPRequestHandler):
                 options = data.get("options", [])
                 req_timeout = int(data.get("timeout", DEFAULT_TIMEOUT))
                 multi_select = bool(data.get("multiSelect"))
+                launch_terminal = bool(data.get("launchTerminal", True))
+                request_id = str(data.get("id") or "")
 
                 future = asyncio.run_coroutine_threadsafe(
-                    bridge.ask_question(header, question, options, timeout=req_timeout, multi_select=multi_select),
+                    bridge.ask_question(
+                        header,
+                        question,
+                        options,
+                        timeout=req_timeout,
+                        multi_select=multi_select,
+                        launch_terminal=launch_terminal,
+                        request_id=request_id,
+                    ),
                     bridge.loop,
                 )
                 index = future.result(timeout=req_timeout + 5)
@@ -579,9 +663,19 @@ class HookHTTPHandler(BaseHTTPRequestHandler):
                 tag = data.get("tag", "")
                 req_timeout = int(data.get("timeout", DEFAULT_TIMEOUT))
                 request_key = data.get("request_key", "")
+                request_id = str(data.get("id") or "")
 
                 future = asyncio.run_coroutine_threadsafe(
-                    bridge.ask_user(title, desc, options, badge=badge, tag=tag, timeout=req_timeout, request_key=request_key),
+                    bridge.ask_user(
+                        title,
+                        desc,
+                        options,
+                        badge=badge,
+                        tag=tag,
+                        timeout=req_timeout,
+                        request_key=request_key,
+                        request_id=request_id,
+                    ),
                     bridge.loop,
                 )
                 decision, reason = future.result(timeout=req_timeout + 5)

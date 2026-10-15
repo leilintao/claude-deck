@@ -114,6 +114,34 @@ class ApprovalSafetyTests(unittest.TestCase):
             self.assertFalse(await bridge.answer_terminal_question("question", 0))
         asyncio.run(run())
 
+    def test_terminal_prompt_answer_races_the_deck(self):
+        async def run():
+            bridge = DeckBridge()
+            event = asyncio.Event()
+            bridge.pending_requests["approval"] = {
+                "event": event,
+                "response": None,
+                "kind": "prompt",
+            }
+            self.assertTrue(await bridge.answer_terminal_prompt("approval", "allow"))
+            self.assertTrue(event.is_set())
+            self.assertEqual(bridge.pending_requests["approval"]["response"], "allow")
+            self.assertFalse(await bridge.answer_terminal_prompt("approval", "deny"))
+        asyncio.run(run())
+
+    def test_invalid_terminal_prompt_answer_is_ignored(self):
+        async def run():
+            bridge = DeckBridge()
+            event = asyncio.Event()
+            bridge.pending_requests["approval"] = {
+                "event": event,
+                "response": None,
+                "kind": "prompt",
+            }
+            self.assertFalse(await bridge.answer_terminal_prompt("approval", "maybe"))
+            self.assertFalse(event.is_set())
+        asyncio.run(run())
+
     def test_http_post_requires_token(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), HookHTTPHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

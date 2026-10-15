@@ -78,6 +78,8 @@ flowchart LR
 │       └── main.cpp             # 固件源码 (LovyanGFX + XPT2046 + NimBLE)
 ├── host/                         # Mac 端中继、仿真器与 Claude Code 钩子
 │   ├── claude_deck_daemon.py    # BLE 守护进程 (监听 127.0.0.1:19842)
+│   ├── deck_code.py             # Agent SDK 单窗口客户端（终端 / 副屏抢答）
+│   ├── deck-code                # 单窗口客户端启动入口
 │   ├── claude_hook.py           # Claude Code 全生命周期钩子脚本
 │   ├── virtual_deck.py          # 桌面原生 320x240 交互仿真器 (监听 127.0.0.1:19843)
 │   ├── test_ble.py              # BLE 物理真机联调测试脚本
@@ -138,7 +140,24 @@ cd host
 
 ---
 
-### 步骤 4：配置 Claude Code 钩子
+### 步骤 4：启动单窗口 Deck Code（推荐）
+
+`deck-code` 基于 Claude Agent SDK 启动 Claude Code 运行时。同一个问题或审批会同时出现在当前终端与实体副屏，任一端先完成后另一端立即失效，不会打开额外 Terminal 窗口。
+
+它会读取 `~/.claude/settings.json` 中由 CCSwitch 当前选中的网关、令牌与模型配置，但不会加载其中的 Hook 和跳过权限设置。CCSwitch 可以照常切换供应商；重新启动 `deck-code` 后使用新配置。
+
+```bash
+# 先做只读兼容检查
+./host/deck-code --doctor
+
+# 在当前目录开始交互
+./host/deck-code
+
+# 指定 Claude 的工作目录
+./host/deck-code --cwd /你的项目目录
+```
+
+### 步骤 5：配置 Claude Code 钩子（兼容旧版工作流）
 
 在你的 Claude Code 全局配置文件 `~/.claude/settings.json` 中添加 `PreToolUse` 与 `PermissionRequest` 钩子配置。推荐只让 `AskUserQuestion` 进入 `PreToolUse`：副屏继续承接 Claude 的提问，而 `Bash`、`Write`、`Edit` 等操作仅在 Claude Code 自身发出权限请求时才显示实体审批卡。
 
