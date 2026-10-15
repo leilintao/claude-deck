@@ -74,6 +74,9 @@ def main():
                 "type": "question_answer",
                 "indexes": [value for value in indexes if value is not None],
                 "multiSelect": bool(question.get("multiSelect")),
+                "questionIndex": index,
+                "questionCount": len(questions),
+                "isLast": index == len(questions) - 1,
             },
         )
     return 0

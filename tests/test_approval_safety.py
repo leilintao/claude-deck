@@ -204,7 +204,15 @@ class ApprovalSafetyTests(unittest.TestCase):
     def test_native_tui_key_translation(self):
         self.assertEqual(selection_keys([0]), b"\r")
         self.assertEqual(selection_keys([2]), b"\x1b[B\x1b[B\r")
-        self.assertEqual(selection_keys([0, 2], multi_select=True), b" \x1b[B\x1b[B \t\r")
+        self.assertEqual(selection_keys([0, 2], multi_select=True), b"\r\x1b[B\x1b[B\r\t\r")
+        self.assertEqual(
+            selection_keys([1], is_last=True, question_count=3),
+            b"\x1b[B\r\r",
+        )
+        self.assertEqual(
+            selection_keys([1, 3], multi_select=True, is_last=False, question_count=3),
+            b"\x1b[B\r\x1b[B\x1b[B\r\t",
+        )
 
     def test_oversize_approval_requires_terminal_review(self):
         output = io.StringIO()

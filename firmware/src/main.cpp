@@ -983,17 +983,30 @@ bool sendSelectionToMac(int optionIndex) {
 }
 
 bool sendMultiSelectionToMac(uint8_t selectedMask) {
-  if (!pTxCharacteristic || strlen(pendingRequestId) == 0 || selectedMask == 0) return false;
-  String indexes = "";
+  if (!pTxCharacteristic || !deviceConnected || strlen(pendingRequestId) == 0 || selectedMask == 0) return false;
+
+  char indexes[16] = "";
+  size_t used = 0;
   for (uint8_t index = 0; index < questionOptionCount; ++index) {
     if (selectedMask & (1 << index)) {
-      if (indexes.length()) indexes += ",";
-      indexes += String(index);
+      int written = snprintf(indexes + used, sizeof(indexes) - used, "%s%d", used ? "," : "", index);
+      if (written < 0 || static_cast<size_t>(written) >= sizeof(indexes) - used) return false;
+      used += static_cast<size_t>(written);
     }
   }
-  String response = "SELECTM:" + String(pendingRequestId) + ":" + indexes;
-  pTxCharacteristic->setValue(response.c_str());
+
+  char response[80];
+  int length = snprintf(response, sizeof(response), "SELECTM:%s:%s", pendingRequestId, indexes);
+  if (length <= 0 || static_cast<size_t>(length) >= sizeof(response)) return false;
+
+  // Use the same explicit byte-length overload as ALLOW/DENY and SELECT.
+  // NimBLE's const-char overload produced a one-byte "?" notification on the
+  // physical ESP32 for SELECTM payloads.
+  pTxCharacteristic->setValue(reinterpret_cast<const uint8_t*>(response), static_cast<size_t>(length));
   pTxCharacteristic->notify();
+  Serial.printf("[BLE] Sent multi-selection: %s\n", response);
+
+  pendingRequestId[0] = '\0';
   return true;
 }
 

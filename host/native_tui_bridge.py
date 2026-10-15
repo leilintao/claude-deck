@@ -32,24 +32,47 @@ def copy_window_size(source_fd, target_fd):
         pass
 
 
-def selection_keys(indexes, multi_select=False):
-    """Translate a deck selection into Claude Code TUI navigation keys."""
+def selection_key_events(
+    indexes, multi_select=False, *, is_last=True, question_count=1
+):
+    """Translate a Deck answer into paced Claude Code TUI input events."""
     clean = sorted({int(index) for index in indexes if int(index) >= 0})
     if not clean:
-        return b""
+        return []
     down = b"\x1b[B"
     if not multi_select:
-        return down * clean[0] + b"\r"
+        events = [down] * clean[0] + [b"\r"]
+        # A multi-question form advances to its Submit tab after the final
+        # single-select answer. The extra Enter confirms that tab.
+        if is_last and question_count > 1:
+            events.append(b"\r")
+        return events
 
-    # Multi-select uses Space to toggle each option, then Tab to Submit.
-    output = bytearray()
+    # Claude's native question UI uses Enter (not Space) to toggle checkboxes.
+    events = []
     cursor = 0
     for index in clean:
-        output.extend(down * (index - cursor))
-        output.extend(b" ")
+        events.extend([down] * (index - cursor))
+        events.append(b"\r")
         cursor = index
-    output.extend(b"\t\r")
-    return bytes(output)
+    # Tab leaves the multi-select question. On the final question it lands on
+    # Submit; otherwise it advances to the next question tab.
+    events.append(b"\t")
+    if is_last:
+        events.append(b"\r")
+    return events
+
+
+def selection_keys(indexes, multi_select=False, *, is_last=True, question_count=1):
+    """Return the byte stream used by tests and simple integrations."""
+    return b"".join(
+        selection_key_events(
+            indexes,
+            multi_select,
+            is_last=is_last,
+            question_count=question_count,
+        )
+    )
 
 
 def run_native_tui(cwd, claude_args):
@@ -105,13 +128,18 @@ def run_native_tui(cwd, claude_args):
                 try:
                     message = json.loads(control.recv(65536).decode("utf-8"))
                     if message.get("type") == "question_answer":
-                        keys = selection_keys(
-                            message.get("indexes", []), bool(message.get("multiSelect"))
+                        events = selection_key_events(
+                            message.get("indexes", []),
+                            bool(message.get("multiSelect")),
+                            is_last=bool(message.get("isLast", True)),
+                            question_count=max(1, int(message.get("questionCount", 1))),
                         )
-                        if keys:
+                        if events:
                             # The Hook returns just before the native question is painted.
                             time.sleep(0.35)
-                            os.write(master_fd, keys)
+                            for event in events:
+                                os.write(master_fd, event)
+                                time.sleep(0.08)
                 except (OSError, ValueError, TypeError):
                     pass
     finally:
