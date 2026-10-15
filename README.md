@@ -144,7 +144,7 @@ cd host
 
 `deck-code` 基于 Claude Agent SDK 启动 Claude Code 运行时。同一个问题或审批会同时出现在当前终端与实体副屏，任一端先完成后另一端立即失效，不会打开额外 Terminal 窗口。
 
-它会读取 `~/.claude/settings.json` 中由 CCSwitch 当前选中的网关、令牌与模型配置，但不会加载其中的 Hook 和跳过权限设置。CCSwitch 可以照常切换供应商；重新启动 `deck-code` 后使用新配置。
+它会读取 `~/.claude/settings.json` 中由 CCSwitch 当前选中的网关、令牌与模型配置，但不会加载用户级 Hook 和跳过权限设置；项目自己的 `CLAUDE.md` 与项目设置仍会生效。CCSwitch 可以照常切换供应商；重新启动 `deck-code` 后使用新配置。
 
 ```bash
 # 先做只读兼容检查

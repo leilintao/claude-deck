@@ -297,7 +297,9 @@ def agent_options(cwd):
         cwd=cwd,
         env=env,
         settings=settings,
-        setting_sources=[],
+        # Keep per-project CLAUDE.md/settings behavior while excluding the
+        # global user Hook source that this client replaces.
+        setting_sources=["project", "local"],
         system_prompt={"type": "preset", "preset": "claude_code"},
         tools={"type": "preset", "preset": "claude_code"},
         permission_mode="default",
