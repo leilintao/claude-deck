@@ -140,14 +140,14 @@ cd host
 
 ### 步骤 4：配置 Claude Code 钩子
 
-在你的 Claude Code 全局配置文件 `~/.claude/settings.json` 中添加 `PreToolUse`、`PermissionRequest` 与 `PostToolUse` 钩子配置：
+在你的 Claude Code 全局配置文件 `~/.claude/settings.json` 中添加 `PreToolUse` 与 `PermissionRequest` 钩子配置。推荐只让 `AskUserQuestion` 进入 `PreToolUse`：副屏继续承接 Claude 的提问，而 `Bash`、`Write`、`Edit` 等操作仅在 Claude Code 自身发出权限请求时才显示实体审批卡。
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "",
+        "matcher": "AskUserQuestion",
         "hooks": [
           {
             "type": "command",
@@ -184,10 +184,10 @@ cd host
 
 > **可选环境变量**：
 > - `CLAUDE_DECK_OFFLINE_POLICY=deny|allow`：副屏离线时的回退策略（默认 `deny` 故障安全拦截）。
-> - `CLAUDE_DECK_INTERCEPT_MODE=pre_tool_use|notify_only`：默认 `pre_tool_use`，在每次非只读工具调用前等待实体审批。`notify_only` 仅展示状态，权限仍由 Claude Code 原生流程决定。
+> - `CLAUDE_DECK_INTERCEPT_MODE=pre_tool_use|notify_only`：默认 `pre_tool_use`，会拦截所有被 `PreToolUse.matcher` 匹配的非只读工具调用。推荐配置只匹配 `AskUserQuestion`，让其它操作沿用 Claude Code 的原生权限判断。`notify_only` 仅展示状态，权限仍由 Claude Code 原生流程决定。
 > - `CLAUDE_DECK_TIMEOUT=120`：审批与提问的超时熔断秒数（默认 `120` 秒）。
 
-> 守护进程和 Hook 自动共用权限为 `0600` 的本机 IPC 令牌。首次绑定与使用后台服务时，应以同一个 macOS 用户运行。安全只读 Bash 规则只自动放行受限参数；其他命令走审批。
+> 守护进程和 Hook 自动共用权限为 `0600` 的本机 IPC 令牌。首次绑定与使用后台服务时，应以同一个 macOS 用户运行。安全只读 Bash 规则只自动放行受限参数；被 Claude Code 请求授权的其它命令会进入实体审批。
 
 ---
 
