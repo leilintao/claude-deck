@@ -33,9 +33,9 @@ def request(path, data=None):
         return json.loads(response.read().decode("utf-8"))
 
 
-def submit(request_id, index):
+def submit(request_id, indexes):
     try:
-        request("/question_answer", {"id": request_id, "index": index})
+        request("/question_answer", {"id": request_id, "indexes": indexes})
         return True
     except urllib.error.HTTPError as error:
         if error.code == 409:
@@ -57,6 +57,7 @@ def main():
     args = parser.parse_args()
     payload = json.loads(base64.urlsafe_b64decode(args.payload.encode("ascii")))
     options = payload.get("options", [])
+    multi_select = bool(payload.get("multiSelect"))
 
     print("\n╭──────────────── Claude Deck ────────────────╮")
     print("│ 同一问题也在实体副屏上，可从任一端先完成。    │")
@@ -69,7 +70,10 @@ def main():
         if description:
             print(f"     {description}")
     print("\n  0. 改在 Claude 原生问题框输入")
-    print("\n输入编号后按 Enter；副屏先回答时此窗口会自动失效。")
+    if multi_select:
+        print("\n输入编号，多个选项用逗号隔开；副屏先回答时此窗口会自动失效。")
+    else:
+        print("\n输入编号后按 Enter；副屏先回答时此窗口会自动失效。")
     sys.stdout.write("> ")
     sys.stdout.flush()
 
@@ -81,16 +85,21 @@ def main():
             if not line:
                 return
             try:
-                choice = int(line.strip())
+                choices = [int(value.strip()) for value in line.split(",") if value.strip()]
             except ValueError:
-                sys.stdout.write("请输入数字：")
+                sys.stdout.write("请输入编号：")
                 sys.stdout.flush()
                 continue
-            if not 0 <= choice <= len(options):
+            if not choices or any(not 0 <= choice <= len(options) for choice in choices):
                 sys.stdout.write("编号不在选项范围内：")
                 sys.stdout.flush()
                 continue
-            if submit(args.request_id, choice - 1):
+            if 0 in choices and len(choices) != 1:
+                sys.stdout.write("0 不能与其它选项同时选择：")
+                sys.stdout.flush()
+                continue
+            indexes = [-1] if choices == [0] else [choice - 1 for choice in choices]
+            if submit(args.request_id, indexes):
                 print("已提交。Claude 将继续执行。")
             else:
                 print("该问题已在副屏完成。")

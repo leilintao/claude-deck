@@ -203,11 +203,12 @@ def normalize_question_payload(question):
         "header": str(question.get("header", "QUESTION")),
         "question": str(question.get("question", "")),
         "options": options,
+        "multiSelect": bool(question.get("multiSelect")),
     }
 
 
 def question_fits_deck(question):
-    if question.get("multiSelect") or len(question.get("options", [])) > 4:
+    if len(question.get("options", [])) > 4:
         return False
     payload = normalize_question_payload(question)
     if not 2 <= len(payload["options"]) <= 4:
@@ -241,7 +242,7 @@ def request_key(data):
 
 
 def ask_deck_question(question, timeout=DEFAULT_TIMEOUT):
-    """阻塞式向副屏推送单道选择题；若用户在副屏点选则返回 (index, option_dict)，否则返回 None"""
+    """Push one question to both Deck inputs and return its selected option(s)."""
     payload = normalize_question_payload(question)
     payload["timeout"] = timeout
     if len(payload["options"]) < 2:
@@ -255,10 +256,22 @@ def ask_deck_question(question, timeout=DEFAULT_TIMEOUT):
         )
         with urllib.request.urlopen(req, timeout=timeout + 5) as resp:
             res = json.loads(resp.read().decode("utf-8"))
-            if res.get("answered") and res.get("index") is not None:
-                idx = int(res["index"])
-                if 0 <= idx < len(payload["options"]):
-                    return idx, payload["options"][idx], payload["question"]
+            if not res.get("answered"):
+                return None
+            indexes = res.get("indexes")
+            if indexes is None and res.get("index") is not None:
+                indexes = [res["index"]]
+            if not isinstance(indexes, list):
+                return None
+            valid_indexes = []
+            for value in indexes:
+                idx = int(value)
+                if idx not in valid_indexes and 0 <= idx < len(payload["options"]):
+                    valid_indexes.append(idx)
+            if not valid_indexes:
+                return None
+            results = [(idx, payload["options"][idx], payload["question"]) for idx in valid_indexes]
+            return results if payload["multiSelect"] else results[0]
     except Exception:
         pass
     return None
@@ -444,8 +457,11 @@ def main():
                 ans = ask_deck_question(q, timeout=question_timeout)
                 if ans is None:
                     sys.exit(0)
-                _, opt, q_text = ans
-                answers[q_text] = opt["label"]
+                if q.get("multiSelect"):
+                    answers[q["question"]] = [option["label"] for _, option, _ in ans]
+                else:
+                    _, opt, q_text = ans
+                    answers[q_text] = opt["label"]
             updated_input = dict(tool_input)
             updated_input["questions"] = questions
             updated_input["answers"] = answers

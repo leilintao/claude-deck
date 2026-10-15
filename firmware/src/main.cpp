@@ -88,6 +88,7 @@ typedef struct {
   char optionLabels[4][64];
   char optionDescriptions[4][128];
   uint8_t optionCount;
+  bool multiSelect;
   uint16_t timeoutSec;
 } DeckMessage;
 
@@ -119,6 +120,8 @@ static String questionOptionDescriptions[4];
 static String selectedQuestionLabel = "";
 static uint8_t questionOptionCount = 0;
 static uint8_t questionPage = 0;
+static bool questionMultiSelect = false;
+static uint8_t questionSelectedMask = 0;
 
 // Scrolling & lifecycle timers
 static int promptScrollLine = 0;
@@ -777,8 +780,10 @@ void renderUI() {
         continue;
       }
 
-      tft.fillRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 8, COLOR_CARD_BG);
-      tft.drawRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 8, COLOR_CARD_BORDER);
+      bool selected = questionMultiSelect && (questionSelectedMask & (1 << index));
+      uint16_t rowBg = selected ? COLOR_CYAN_BG : COLOR_CARD_BG;
+      tft.fillRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 8, rowBg);
+      tft.drawRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 8, selected ? COLOR_CYAN_ACCENT : COLOR_CARD_BORDER);
 
       // Number badge (uniform cyan style for all interactive options)
       tft.fillRoundRect(QUESTION_ROW_X + 8, y + 10, 24, 32, 4, COLOR_CYAN_BG);
@@ -789,9 +794,9 @@ void renderUI() {
       tft.drawCenterString(numBuf, QUESTION_ROW_X + 20, y + 18);
 
       // Label & Description
-      tft.setTextColor(COLOR_TEXT_WHITE, COLOR_CARD_BG);
+      tft.setTextColor(COLOR_TEXT_WHITE, rowBg);
       tft.drawString(questionOptionLabels[index].c_str(), QUESTION_ROW_X + 40, y + 9);
-      tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD_BG);
+      tft.setTextColor(COLOR_TEXT_MUTED, rowBg);
       drawWrappedText(questionOptionDescriptions[index], QUESTION_ROW_X + 40, y + 29, QUESTION_ROW_W - 65, 14, 1, 0);
 
       // Right Chevron
@@ -822,9 +827,21 @@ void renderUI() {
       snprintf(pageIndicator, sizeof(pageIndicator), "第 %d / %d 页", questionPage + 1, pageCount);
       tft.setTextColor(COLOR_TEXT_MUTED, COLOR_BG);
       tft.drawCenterString(pageIndicator, 147, QUESTION_NAV_Y + 5);
+      if (questionMultiSelect) {
+        tft.fillRoundRect(92, QUESTION_NAV_Y, 110, 24, 6, questionSelectedMask ? COLOR_CYAN_BG : COLOR_CARD_BG);
+        tft.drawRoundRect(92, QUESTION_NAV_Y, 110, 24, 6, COLOR_CYAN_ACCENT);
+        tft.setTextColor(questionSelectedMask ? COLOR_CYAN_HI : COLOR_TEXT_DIM, questionSelectedMask ? COLOR_CYAN_BG : COLOR_CARD_BG);
+        tft.drawCenterString("SUBMIT", 147, QUESTION_NAV_Y + 5);
+      }
     } else {
       tft.setTextColor(COLOR_TEXT_MUTED, COLOR_BG);
-      tft.drawCenterString("轻触选项卡片直接作答回传", 160, QUESTION_NAV_Y + 5);
+      tft.drawCenterString(questionMultiSelect ? "选择后点 SUBMIT 提交" : "轻触选项卡片直接作答回传", 160, QUESTION_NAV_Y + 5);
+      if (questionMultiSelect) {
+        tft.fillRoundRect(103, QUESTION_NAV_Y, 114, 24, 6, questionSelectedMask ? COLOR_CYAN_BG : COLOR_CARD_BG);
+        tft.drawRoundRect(103, QUESTION_NAV_Y, 114, 24, 6, COLOR_CYAN_ACCENT);
+        tft.setTextColor(questionSelectedMask ? COLOR_CYAN_HI : COLOR_TEXT_DIM, questionSelectedMask ? COLOR_CYAN_BG : COLOR_CARD_BG);
+        tft.drawCenterString("SUBMIT", 160, QUESTION_NAV_Y + 5);
+      }
     }
   }
   else if (currentState == STATE_ANSWERED_ALLOW) {
@@ -962,6 +979,21 @@ bool sendSelectionToMac(int optionIndex) {
   Serial.printf("[BLE] Sent selection: %s\n", response);
 
   pendingRequestId[0] = '\0';
+  return true;
+}
+
+bool sendMultiSelectionToMac(uint8_t selectedMask) {
+  if (!pTxCharacteristic || strlen(pendingRequestId) == 0 || selectedMask == 0) return false;
+  String indexes = "";
+  for (uint8_t index = 0; index < questionOptionCount; ++index) {
+    if (selectedMask & (1 << index)) {
+      if (indexes.length()) indexes += ",";
+      indexes += String(index);
+    }
+  }
+  String response = "SELECTM:" + String(pendingRequestId) + ":" + indexes;
+  pTxCharacteristic->setValue(response.c_str());
+  pTxCharacteristic->notify();
   return true;
 }
 
@@ -1199,6 +1231,7 @@ class RxCallbacks: public NimBLECharacteristicCallbacks {
 
         JsonArray options = doc["options"];
         msg.optionCount = (uint8_t)min((size_t)QUESTION_MAX_OPTIONS, options.size());
+        msg.multiSelect = doc["multiSelect"] | false;
         for (uint8_t i = 0; i < msg.optionCount; ++i) {
           copyJsonString(options[i]["label"], msg.optionLabels[i], sizeof(msg.optionLabels[i]));
           copyJsonString(options[i]["description"], msg.optionDescriptions[i], sizeof(msg.optionDescriptions[i]));
@@ -1254,6 +1287,8 @@ void handleQueuedMessage(DeckMessage& msg) {
     questionText = msg.question;
     questionOptionCount = msg.optionCount;
     questionPage = 0;
+    questionMultiSelect = msg.multiSelect;
+    questionSelectedMask = 0;
     activeTimeoutSec = msg.timeoutSec > 0 ? msg.timeoutSec : 120;
 
     for (uint8_t i = 0; i < QUESTION_MAX_OPTIONS; ++i) {
@@ -1514,6 +1549,24 @@ void loop() {
           playEarconTap();
           renderUI();
         }
+        if (questionMultiSelect && screenX >= 92 && screenX <= 202 && questionSelectedMask) {
+          if (sendMultiSelectionToMac(questionSelectedMask)) {
+            selectedQuestionLabel = "已提交多个选择";
+            currentState = STATE_ANSWERED_QUESTION;
+            stateEnteredMillis = millis();
+            renderUI();
+          }
+        }
+        goto endTouch;
+      }
+
+      if (questionMultiSelect && pageCount == 1 && screenY >= QUESTION_NAV_Y && screenY <= 238 && screenX >= 103 && screenX <= 217 && questionSelectedMask) {
+        if (sendMultiSelectionToMac(questionSelectedMask)) {
+          selectedQuestionLabel = "已提交多个选择";
+          currentState = STATE_ANSWERED_QUESTION;
+          stateEnteredMillis = millis();
+          renderUI();
+        }
         goto endTouch;
       }
 
@@ -1527,6 +1580,12 @@ void loop() {
       }
 
       if (selectedOption >= 0 && selectedOption < questionOptionCount) {
+        if (questionMultiSelect) {
+          questionSelectedMask ^= (1 << selectedOption);
+          playEarconTap();
+          renderUI();
+          goto endTouch;
+        }
         int row = selectedOption - start;
         int y = (row == 0) ? QUESTION_ROW1_Y : QUESTION_ROW2_Y;
         tft.fillRoundRect(QUESTION_ROW_X, y, QUESTION_ROW_W, QUESTION_ROW_H, 8, TFT_WHITE);

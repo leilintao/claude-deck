@@ -145,6 +145,7 @@ cd host
 即使你用 `claude --dangerously-skip-permissions` 启动，`AskUserQuestion` 的 `PreToolUse` Hook 仍会把选择题交给副屏；该启动参数只会跳过 Claude Code 的原生工具权限弹窗。
 
 每道由副屏承接的问题也会打开一个 Claude Deck 终端选择窗口。两个入口共用同一个答案：任一端先选择，另一端立即失效；终端窗口输入 `0` 会转回 Claude Code 的原生问题界面，便于输入自由文本。
+副屏与终端窗口均支持单选和多选；多选时在副屏勾选后点击 `SUBMIT`，在终端用逗号分隔编号提交。
 
 ```json
 {

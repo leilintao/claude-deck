@@ -105,9 +105,12 @@ class ApprovalSafetyTests(unittest.TestCase):
             event = asyncio.Event()
             bridge.pending_requests["question"] = {"event": event, "response": None, "kind": "question"}
             self.assertTrue(bridge.question_is_pending("question"))
-            self.assertTrue(await bridge.answer_terminal_question("question", 1))
+            self.assertTrue(await bridge.answer_terminal_question("question", [1]))
             self.assertTrue(event.is_set())
-            self.assertEqual(bridge.pending_requests["question"]["response"], {"kind": "select", "index": 1})
+            self.assertEqual(
+                bridge.pending_requests["question"]["response"],
+                {"kind": "select", "indexes": [1], "index": 1},
+            )
             self.assertFalse(await bridge.answer_terminal_question("question", 0))
         asyncio.run(run())
 
@@ -162,10 +165,27 @@ class ApprovalSafetyTests(unittest.TestCase):
             claude_hook.main()
         approve.assert_called_once()
 
-    def test_multiselect_question_uses_native_ui(self):
+    def test_multiselect_question_uses_the_deck(self):
         question = {"question": "Pick any", "multiSelect": True,
                     "options": [{"label": "A"}, {"label": "B"}]}
-        self.assertFalse(claude_hook.question_fits_deck(question))
+        self.assertTrue(claude_hook.question_fits_deck(question))
+
+    def test_multi_selection_is_preserved(self):
+        async def run():
+            bridge = DeckBridge()
+            event = asyncio.Event()
+            bridge.pending_requests["multi"] = {
+                "event": event,
+                "response": None,
+                "kind": "question",
+                "multi_select": True,
+            }
+            self.assertTrue(await bridge.answer_terminal_question("multi", [0, 2]))
+            self.assertEqual(
+                bridge.pending_requests["multi"]["response"],
+                {"kind": "select_multi", "indexes": [0, 2], "index": 0},
+            )
+        asyncio.run(run())
 
     def test_long_option_descriptions_still_use_the_deck(self):
         question = {

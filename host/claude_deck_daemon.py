@@ -128,7 +128,15 @@ class DeckBridge:
             text = data.decode("utf-8", errors="ignore").strip().upper()
             logging.info(f"👉 收到副屏触控反馈: {text}")
 
-            if text.startswith("SELECT:"):
+            if text.startswith("SELECTM:"):
+                parts = text.split(":", 2)
+                if len(parts) != 3:
+                    logging.warning("忽略格式错误的多选回复: %r", text)
+                    return
+                request_id = parts[1]
+                indexes = [int(value) for value in parts[2].split(",") if value.strip().isdigit()]
+                decision = {"kind": "select_multi", "indexes": indexes}
+            elif text.startswith("SELECT:"):
                 parts = text.split(":")
                 if len(parts) != 3:
                     logging.warning("忽略格式错误的选项回复: %r", text)
@@ -160,15 +168,25 @@ class DeckBridge:
         except Exception as e:
             logging.error(f"解析触控数据失败: {e}")
 
-    async def answer_terminal_question(self, request_id, index):
+    async def answer_terminal_question(self, request_id, indexes):
         """Accept a choice from the companion terminal for a live deck question."""
         waiter = self.pending_requests.get(str(request_id).lower())
         if not waiter or waiter["kind"] != "question" or waiter["event"].is_set():
             return False
-        if index == -1:
+        if indexes == [-1]:
             waiter["response"] = "cancelled"
         else:
-            waiter["response"] = {"kind": "select", "index": index}
+            clean_indexes = []
+            for index in indexes:
+                if isinstance(index, int) and index >= 0 and index not in clean_indexes:
+                    clean_indexes.append(index)
+            if not clean_indexes:
+                return False
+            waiter["response"] = {
+                "kind": "select_multi" if waiter.get("multi_select") else "select",
+                "indexes": clean_indexes,
+                "index": clean_indexes[0],
+            }
         waiter["event"].set()
         return True
 
@@ -176,14 +194,20 @@ class DeckBridge:
         waiter = self.pending_requests.get(str(request_id).lower())
         return bool(waiter and waiter["kind"] == "question" and not waiter["event"].is_set())
 
-    def launch_terminal_question(self, request_id, header, question, options, timeout):
+    def launch_terminal_question(self, request_id, header, question, options, timeout, multi_select):
         """Open a small companion terminal that races the physical deck."""
         if sys.platform != "darwin" or os.environ.get("CLAUDE_DECK_TERMINAL_QUESTION", "1") == "0":
             return
         helper = Path(__file__).with_name("terminal_question.py")
         payload = base64.urlsafe_b64encode(
             json.dumps(
-                {"header": header, "question": question, "options": options, "timeout": timeout},
+                {
+                    "header": header,
+                    "question": question,
+                    "options": options,
+                    "timeout": timeout,
+                    "multiSelect": multi_select,
+                },
                 ensure_ascii=False,
             ).encode("utf-8")
         ).decode("ascii")
@@ -252,12 +276,12 @@ class DeckBridge:
         }
         return await self.send_prompt(payload)
 
-    async def ask_question(self, header, question, options, timeout=DEFAULT_TIMEOUT):
+    async def ask_question(self, header, question, options, timeout=DEFAULT_TIMEOUT, multi_select=False):
         """Show one Claude question on the deck and return the selected index."""
         async with self.approval_lock:
-            return await self._ask_question(header, question, options, timeout)
+            return await self._ask_question(header, question, options, timeout, multi_select)
 
-    async def _ask_question(self, header, question, options, timeout):
+    async def _ask_question(self, header, question, options, timeout, multi_select):
         if not self.is_connected:
             logging.warning("副屏未连接，Claude 问题回退到终端原生 UI")
             return None
@@ -266,7 +290,7 @@ class DeckBridge:
             return None
 
         request_id = uuid.uuid4().hex[:16]
-        waiter = {"event": asyncio.Event(), "response": None, "kind": "question"}
+        waiter = {"event": asyncio.Event(), "response": None, "kind": "question", "multi_select": multi_select}
         self.pending_requests[request_id] = waiter
 
         payload = {
@@ -275,6 +299,7 @@ class DeckBridge:
             "header": header[:20],
             "question": question[:200],
             "options": options[:4],
+            "multiSelect": multi_select,
             "timeout": int(timeout),
         }
 
@@ -285,7 +310,7 @@ class DeckBridge:
                 return None
 
             logging.info(f"已推送 Claude 问题至副屏: [{request_id}] {question}")
-            self.launch_terminal_question(request_id, header, question, options, timeout)
+            self.launch_terminal_question(request_id, header, question, options, timeout, multi_select)
             try:
                 await asyncio.wait_for(waiter["event"].wait(), timeout=timeout)
                 response = waiter["response"]
@@ -294,6 +319,11 @@ class DeckBridge:
                     if 0 <= index < len(options):
                         logging.info(f"Claude Deck 问题已选择选项: {index}")
                         return index
+                if isinstance(response, dict) and response.get("kind") == "select_multi" and multi_select:
+                    indexes = [int(index) for index in response.get("indexes", [])]
+                    if indexes and all(0 <= index < len(options) for index in indexes):
+                        logging.info("Claude Deck 多选问题已选择选项: %s", indexes)
+                        return indexes
                 if response == "cancelled":
                     await self.send_status("idle", "已转回 Claude 原生输入", force=True)
                 return None
@@ -402,9 +432,13 @@ class HookHTTPHandler(BaseHTTPRequestHandler):
             try:
                 data = json.loads(body)
                 request_id = str(data.get("id") or "")
-                index = int(data.get("index"))
+                indexes = data.get("indexes")
+                if indexes is None:
+                    indexes = [int(data.get("index"))]
+                if not isinstance(indexes, list) or not all(isinstance(index, int) for index in indexes):
+                    raise ValueError("Invalid terminal question indexes")
                 future = asyncio.run_coroutine_threadsafe(
-                    bridge.answer_terminal_question(request_id, index), bridge.loop
+                    bridge.answer_terminal_question(request_id, indexes), bridge.loop
                 )
                 if not future.result(timeout=2):
                     self.send_error(409, "Question is no longer pending")
@@ -508,9 +542,10 @@ class HookHTTPHandler(BaseHTTPRequestHandler):
                 question = data.get("question", "")
                 options = data.get("options", [])
                 req_timeout = int(data.get("timeout", DEFAULT_TIMEOUT))
+                multi_select = bool(data.get("multiSelect"))
 
                 future = asyncio.run_coroutine_threadsafe(
-                    bridge.ask_question(header, question, options, timeout=req_timeout),
+                    bridge.ask_question(header, question, options, timeout=req_timeout, multi_select=multi_select),
                     bridge.loop,
                 )
                 index = future.result(timeout=req_timeout + 5)
@@ -522,7 +557,8 @@ class HookHTTPHandler(BaseHTTPRequestHandler):
                     json.dumps(
                         {
                             "answered": index is not None,
-                            "index": index,
+                            "index": index[0] if isinstance(index, list) and index else index,
+                            "indexes": index if isinstance(index, list) else ([index] if index is not None else []),
                         }
                     ).encode("utf-8")
                 )
