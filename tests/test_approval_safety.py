@@ -155,6 +155,24 @@ class ApprovalSafetyTests(unittest.TestCase):
                     "options": [{"label": "A"}, {"label": "B"}]}
         self.assertFalse(claude_hook.question_fits_deck(question))
 
+    def test_long_option_descriptions_still_use_the_deck(self):
+        question = {
+            "header": "今天聊什么",
+            "question": "今天最想聊哪条线?",
+            "options": [
+                {"label": "舅舅五金出海", "description": "登山扣/箱包五金独立站的八周验证进展"},
+                {"label": "TK日区店铺", "description": "妙手ERP链路之后的选品、流量、第一单"},
+            ],
+        }
+        payload = claude_hook.normalize_question_payload(question)
+        self.assertTrue(claude_hook.question_fits_deck(question))
+        self.assertLessEqual(len(payload["options"][0]["description"].encode()), 110)
+        self.assertLessEqual(
+            sum(14 if ord(char) > 127 else 8 for char in payload["options"][0]["description"]),
+            205,
+        )
+        self.assertTrue(payload["options"][0]["description"].endswith("…"))
+
 
 if __name__ == "__main__":
     unittest.main()

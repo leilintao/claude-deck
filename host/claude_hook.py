@@ -122,6 +122,28 @@ def smart_truncate_text(text, max_len=160):
     return text[: max_len - 3] + "..."
 
 
+def truncate_deck_line(text, max_width=205, max_bytes=110):
+    """Fit auxiliary option text into the one-line physical question card."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not text:
+        return ""
+
+    def width(value):
+        return sum(14 if ord(char) > 127 else 8 for char in value)
+
+    if len(text.encode("utf-8")) <= max_bytes and width(text) <= max_width:
+        return text
+
+    suffix = "…"
+    result = ""
+    for char in text:
+        candidate = result + char
+        if len((candidate + suffix).encode("utf-8")) > max_bytes or width(candidate + suffix) > max_width:
+            break
+        result = candidate
+    return (result or suffix) + suffix
+
+
 def format_prompt(event_name, tool_name, tool_input):
     """根据不同的工具类型生成副屏友好的标题、描述、角标与分类标签"""
     if tool_name == "Bash":
@@ -162,7 +184,10 @@ def normalize_question_payload(question):
             options.append(
                 {
                     "label": str(option.get("label", option.get("text", ""))),
-                    "description": str(option.get("description", "")),
+                    # The 320×240 display gives option descriptions one visual line.
+                    # Keep the choice label unchanged so the answer returned to Claude
+                    # always matches its original option exactly.
+                    "description": truncate_deck_line(option.get("description", "")),
                 }
             )
         else:
@@ -196,9 +221,7 @@ def question_fits_deck(question):
         return False
     return all(
         len(option["label"].encode()) <= 60 and
-        len(option["description"].encode()) <= 110 and
-        approximate_width(option["label"]) <= 205 and
-        approximate_width(option["description"]) <= 205
+        approximate_width(option["label"]) <= 205
         for option in payload["options"]
     )
 

@@ -142,6 +142,8 @@ cd host
 
 在你的 Claude Code 全局配置文件 `~/.claude/settings.json` 中添加 `PreToolUse` 与 `PermissionRequest` 钩子配置。推荐只让 `AskUserQuestion` 进入 `PreToolUse`：副屏继续承接 Claude 的提问，而 `Bash`、`Write`、`Edit` 等操作仅在 Claude Code 自身发出权限请求时才显示实体审批卡。
 
+即使你用 `claude --dangerously-skip-permissions` 启动，`AskUserQuestion` 的 `PreToolUse` Hook 仍会把选择题交给副屏；该启动参数只会跳过 Claude Code 的原生工具权限弹窗。
+
 ```json
 {
   "hooks": {
