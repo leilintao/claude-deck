@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import io
 import json
+import os
 import sys
 import threading
 import types
@@ -24,6 +25,7 @@ except ImportError:
 
 from host import claude_hook
 from host.claude_deck_daemon import DeckBridge, HookHTTPHandler
+from host.native_tui_bridge import selection_keys
 
 
 class FakeClient:
@@ -175,6 +177,34 @@ class ApprovalSafetyTests(unittest.TestCase):
         decision = json.loads(output.getvalue())["hookSpecificOutput"]
         self.assertEqual(decision["permissionDecision"], "allow")
         self.assertEqual(decision["updatedInput"]["answers"], {"Which option?": "B"})
+
+    def test_native_tui_question_returns_control_to_claude(self):
+        question = {
+            "header": "Choice",
+            "question": "Which option?",
+            "options": [{"label": "A"}, {"label": "B"}],
+        }
+        data = {
+            "session_id": "native-session",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [question]},
+        }
+        output = io.StringIO()
+        with mock.patch.dict(
+            os.environ,
+            {"CLAUDE_DECK_NATIVE_TUI": "1", "CLAUDE_DECK_CONTROL_SOCKET": "/tmp/deck.sock"},
+        ), mock.patch.object(sys, "stdin", io.StringIO(json.dumps(data))), mock.patch.object(
+            claude_hook, "relay_native_questions", return_value=True
+        ) as relay, contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
+            claude_hook.main()
+        relay.assert_called_once()
+        self.assertEqual(output.getvalue(), "")
+
+    def test_native_tui_key_translation(self):
+        self.assertEqual(selection_keys([0]), b"\r")
+        self.assertEqual(selection_keys([2]), b"\x1b[B\x1b[B\r")
+        self.assertEqual(selection_keys([0, 2], multi_select=True), b" \x1b[B\x1b[B \t\r")
 
     def test_oversize_approval_requires_terminal_review(self):
         output = io.StringIO()

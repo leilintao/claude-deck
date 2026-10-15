@@ -4,9 +4,11 @@ import hashlib
 import os
 import re
 import shlex
+import subprocess
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 try:
     from .deck_auth import load_token
@@ -241,6 +243,59 @@ def request_key(data):
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def native_question_id(key, index):
+    return hashlib.sha256(f"{key}:{index}".encode()).hexdigest()[:16]
+
+
+def relay_native_questions(data, questions):
+    """Start a detached relay while allowing Claude's native TUI to render."""
+    socket_path = os.environ.get("CLAUDE_DECK_CONTROL_SOCKET", "")
+    key = request_key(data)
+    if not socket_path or not key:
+        return False
+    helper = Path(__file__).with_name("native_question_relay.py")
+    payload = {
+        "socket": socket_path,
+        "request_key": key,
+        "questions": questions,
+        "timeout": max(5, min(DEFAULT_TIMEOUT, (540 - 15) // len(questions))),
+    }
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(helper)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        json.dump(payload, process.stdin, ensure_ascii=False)
+        process.stdin.close()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def cancel_native_questions(data):
+    questions = data.get("tool_input", {}).get("questions", [])
+    key = request_key(data)
+    if not key or not isinstance(questions, list):
+        return
+    for index in range(len(questions)):
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:19842/question_answer",
+                data=json.dumps(
+                    {"id": native_question_id(key, index), "indexes": [-1]}
+                ).encode("utf-8"),
+                headers=local_headers(),
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=1).close()
+        except Exception:
+            pass
+
+
 def ask_deck_question(question, timeout=DEFAULT_TIMEOUT):
     """Push one question to both Deck inputs and return its selected option(s)."""
     payload = normalize_question_payload(question)
@@ -430,6 +485,12 @@ def main():
 
     # 1. 工具执行完成或会话停止时：通知副屏自动消警归位 IDLE，防止主屏已确认但副屏仍挂着旧卡片
     if event_name in ("PostToolUse", "Stop", "SubagentStop"):
+        if (
+            event_name == "PostToolUse"
+            and tool_name == "AskUserQuestion"
+            and os.environ.get("CLAUDE_DECK_NATIVE_TUI") == "1"
+        ):
+            cancel_native_questions(data)
         notify_deck_status("idle", "副屏已就绪，正在监听 Claude Code 编程指令...", key=request_key(data))
         sys.exit(0)
 
@@ -451,6 +512,9 @@ def main():
                 questions = [tool_input]
             if not questions or len(questions) > 4 or not all(isinstance(q, dict) and question_fits_deck(q) for q in questions):
                 sys.exit(0)  # Native UI handles unsupported question shapes.
+            if os.environ.get("CLAUDE_DECK_NATIVE_TUI") == "1":
+                relay_native_questions(data, questions)
+                sys.exit(0)
             answers = {}
             question_timeout = max(5, min(DEFAULT_TIMEOUT, (540 - 15) // len(questions)))
             for q in questions:

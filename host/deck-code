@@ -2,4 +2,4 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec uv run --script "$SCRIPT_DIR/deck_code.py" "$@"
+exec python3 "$SCRIPT_DIR/native_tui_bridge.py" "$@"

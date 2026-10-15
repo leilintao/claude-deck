@@ -78,8 +78,11 @@ flowchart LR
 │       └── main.cpp             # 固件源码 (LovyanGFX + XPT2046 + NimBLE)
 ├── host/                         # Mac 端中继、仿真器与 Claude Code 钩子
 │   ├── claude_deck_daemon.py    # BLE 守护进程 (监听 127.0.0.1:19842)
-│   ├── deck_code.py             # Agent SDK 单窗口客户端（终端 / 副屏抢答）
-│   ├── deck-code                # 单窗口客户端启动入口
+│   ├── native_tui_bridge.py     # 原生 Claude Code TUI 的透明 PTY 桥
+│   ├── native_question_relay.py # 将副屏选择送回原生 TUI
+│   ├── deck_code.py             # 精简 Agent SDK 客户端（备用）
+│   ├── deck-code                # 原生 TUI 启动入口
+│   ├── deck-code-sdk            # 精简 Agent SDK 客户端入口
 │   ├── claude_hook.py           # Claude Code 全生命周期钩子脚本
 │   ├── virtual_deck.py          # 桌面原生 320x240 交互仿真器 (监听 127.0.0.1:19843)
 │   ├── test_ble.py              # BLE 物理真机联调测试脚本
@@ -140,22 +143,24 @@ cd host
 
 ---
 
-### 步骤 4：启动单窗口 Deck Code（推荐）
+### 步骤 4：启动原生 TUI Deck Code（推荐）
 
-`deck-code` 基于 Claude Agent SDK 启动 Claude Code 运行时。同一个问题或审批会同时出现在当前终端与实体副屏，任一端先完成后另一端立即失效，不会打开额外 Terminal 窗口。
+`deck-code` 在透明 PTY 中运行本机原版 Claude Code，因此欢迎页、输入框、思考动画、问题卡和斜杠命令都由 Claude Code 原生 TUI 渲染。同一个结构化问题会同时出现在当前终端与实体副屏，副屏选择会转换成原生 TUI 按键；终端先回答时会取消副屏卡片。不会打开额外 Terminal 窗口。
 
-它会读取 `~/.claude/settings.json` 中由 CCSwitch 当前选中的网关、令牌与模型配置，但不会加载用户级 Hook 和跳过权限设置；项目自己的 `CLAUDE.md` 与项目设置仍会生效。CCSwitch 可以照常切换供应商；重新启动 `deck-code` 后使用新配置。
+它直接运行 `claude`，所以 CCSwitch 当前选中的网关、令牌、模型、插件、`CLAUDE.md` 和项目设置全部保持原样。默认追加 `--dangerously-skip-permissions`；传入 `--no-bypass-permissions` 可以恢复 Claude Code 权限模式。
 
 ```bash
-# 先做只读兼容检查
-./host/deck-code --doctor
+# 首次安装原生问题同步 Hook
+python3 ./host/configure_native_tui.py
 
-# 在当前目录开始交互
-./host/deck-code
+# 在当前目录以原生 Claude Code TUI 开始交互
+./host/deck-code --cwd "$PWD"
 
-# 指定 Claude 的工作目录
-./host/deck-code --cwd /你的项目目录
+# 使用原生权限模式
+./host/deck-code --no-bypass-permissions --cwd "$PWD"
 ```
+
+只有 Claude 实际调用 `AskUserQuestion` 时才存在可同步的问题事件。`deck-code` 会向原生系统提示追加约束，要求需要用户选择、确认或澄清时使用该工具；模型直接输出的普通问句仍然只是文本，不会在副屏生成可点击卡片。
 
 ### 步骤 5：配置 Claude Code 钩子（兼容旧版工作流）
 
