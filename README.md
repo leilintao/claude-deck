@@ -1,249 +1,238 @@
 <div align="center">
 
-# 🤖 Claude Deck
-### A Wireless Bluetooth Touch Companion & Physical Approval Deck for Claude Code
-**基于 ESP32-2432S028 (CYD / 小黄板) 的 Claude Code 物理副屏交互终端**
+# Claude Deck
+
+**把 ESP32 触控屏变成 Claude Code 的实体交互副屏**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32-orange.svg)](https://platformio.org/)
-[![Bluetooth](https://img.shields.io/badge/BLE-Bluetooth%205.0-blue.svg)]()
-[![Claude Code](https://img.shields.io/badge/Claude%20Code-Hooks%20Ready-purple.svg)](https://claude.ai/code)
+[![Hardware](https://img.shields.io/badge/Hardware-ESP32--2432S028-orange.svg)](firmware)
+[![Host](https://img.shields.io/badge/Host-macOS-black.svg)](host)
 
 </div>
 
----
+Claude Deck 使用一块常见的 **ESP32-2432S028（2.8 英寸 CYD 小黄板）**，通过蓝牙与 Mac 上的 Claude Code 通信。Claude 需要用户选择、确认权限或报告运行状态时，副屏会显示对应卡片；用户可以在终端或副屏完成交互。
 
-## 🌟 概述 / Overview
+![Claude Deck 问题卡](screenshots/11_task_question_options_page1.png)
 
-**Claude Deck** 将百元级的开源小黄板开发板（**ESP32-2432S028**）打造为 **Claude Code** 的桌面实体“副驾驶”终端。
+## 可以做什么
 
-当 Claude Code 在终端执行工具调用或请求高危权限（如执行 Bash 脚本、运行终端命令或修改关键代码）时：
-1. **安全配对**：首次使用时将 Mac 与副屏绑定；之后 Mac 端守护进程通过加密 BLE 连接推送待确认事件与执行状态；
-2. **多感官分级提醒**：副屏自动点亮卡片详情、硬件 `LEDC` PWM 蜂鸣器发出多音阶语义提示音（支持一键静音）、板载 RGB LED 随状态变色（待命绿 / 思考蓝 / 审批黄 / 拦截红）；
-3. **触控交互与长命令翻页**：可点击代码框翻页查看副屏可容纳的完整操作详情；超出容量的请求转到终端完整审批；
-4. **即时放行/拦截与双端同步**：终端无缝获得物理应答并继续工作；若在 Mac 键盘直接确认，`PostToolUse` 钩子会自动通知副屏消警归位！
+- **同步 Claude 提问**：支持 `AskUserQuestion` 单选、多选和多题表单。
+- **实体权限审批**：Claude Code 发出原生权限请求时，可在副屏允许或拒绝。
+- **双端交互**：同一个问题保留在 Claude 原生 TUI，同时也显示在副屏；任一端先完成即可继续。
+- **完整信息审阅**：长命令可翻页；不适合副屏显示的内容回退到终端。
+- **状态提醒**：显示待命、思考、审批、通过、拒绝和超时状态，并提供 RGB 灯与提示音。
+- **日常体验**：支持一键静音、60 秒自动降亮、触摸唤醒和防误触。
+- **安全回退**：蓝牙离线或等待超时时默认拒绝需要实体审批的操作。
 
----
-
-## 📐 系统架构 / Architecture
+## 实现方法与设计逻辑
 
 ```mermaid
 flowchart LR
-    subgraph Mac ["💻 macOS Host"]
-        CC["Claude Code CLI"]
-        Hook["claude_hook.py<br/>(PreToolUse / PermissionRequest / PostToolUse)"]
-        Daemon["claude_deck_daemon.py<br/>(BLE Bridge)"]
-        
-        CC -- 1. Trigger Hook --> Hook
-    Hook -- 2. 带本机令牌的 HTTP POST --> Daemon
-    end
-
-    subgraph ESP ["📟 ESP32-2432S028 (CYD)"]
-        BLE["NimBLE GATT Server"]
-        UI["LovyanGFX Display Engine"]
-        Touch["XPT2046 Hardware SPI"]
-        Alert["LEDC PWM Audio + RGB LED"]
-
-        BLE --> UI
-        UI --> Alert
-        Touch -- 4. Tap Feedback --> BLE
-    end
-
-    Daemon <-- 3. 配对并加密的 BLE --> BLE
-    Hook -- 5. Hook JSON Decision --> CC
+    Claude[Claude Code 原生 TUI] --> Hook[Claude Code Hooks]
+    Hook -->|本机 HTTP| Daemon[Mac BLE 守护进程]
+    Daemon <-->|加密 BLE| Deck[ESP32 触控副屏]
+    Deck -->|触控结果| Daemon
+    Daemon --> Bridge[PTY 输入桥]
+    Bridge --> Claude
 ```
 
----
+项目分为三层：
 
-## 🛠️ 硬件引脚定义 / Pinout (ESP32-2432S028 / HW-458)
+1. **Claude 接入层**：Hook 捕获结构化问题和权限事件；`deck-code` 使用透明 PTY 启动原版 Claude Code，因此欢迎页、输入框、插件和斜杠命令仍是原生体验。
+2. **Mac 桥接层**：守护进程只监听 `127.0.0.1:19842`，负责蓝牙连接、消息排队、超时和触控结果回传。
+3. **ESP32 交互层**：固件负责屏幕、触摸、提示音、状态灯和 UI 状态机，不保存 Claude 会话内容。
 
-| 模块类别 | 硬件型号与特性 | GPIO 管脚分配 |
-| :--- | :--- | :--- |
-| **主控芯片** | ESP-WROOM-32 (240MHz 双核, 520KB SRAM) | 板载 PCB 天线 (2dBi) |
-| **显示屏幕** | 2.8 英寸 TFT 320×240 (ILI9341 / ST7789) | MOSI:13, MISO:12, SCLK:14, CS:15, DC:2 |
-| **屏幕背光** | 硬件 `LEDC` PWM 自动调光与闲置休眠 (BL) | **GPIO 21** & **GPIO 27** (PWM Channel 0) |
-| **电阻触摸** | XPT2046 独立硬件 VSPI 总线 (带压力过滤与释放锁) | CLK:25, MISO:39, MOSI:32, CS:33, IRQ:36 |
-| **状态指示** | 板载三色 RGB LED (Active LOW) | R:4, G:16, B:17 |
-| **音频提醒** | 板载微型功放 (`LEDC` PWM 多音阶提示音) | **GPIO 26** (PWM Channel 1) |
+设计上遵循以下原则：
 
----
+- 终端和副屏共享同一个交互，谁先完成谁生效。
+- 权限请求必须展示足够的信息；内容过长时交给终端处理。
+- 断线、超时和无效数据采用故障安全策略。
+- CCSwitch、模型配置、插件、`CLAUDE.md` 和项目设置继续由原版 Claude Code 管理。
 
-## 📂 项目结构 / Repository Layout
+更完整的技术说明见 [架构文档](docs/ARCHITECTURE.md)。
 
-```text
-.
-├── firmware/                     # ESP32 固件源码 (PlatformIO 工程)
-│   ├── platformio.ini           # 编译参数与库依赖配置
-│   └── src/
-│       └── main.cpp             # 固件源码 (LovyanGFX + XPT2046 + NimBLE)
-├── host/                         # Mac 端中继、仿真器与 Claude Code 钩子
-│   ├── claude_deck_daemon.py    # BLE 守护进程 (监听 127.0.0.1:19842)
-│   ├── native_tui_bridge.py     # 原生 Claude Code TUI 的透明 PTY 桥
-│   ├── native_question_relay.py # 将副屏选择送回原生 TUI
-│   ├── deck_code.py             # 精简 Agent SDK 客户端（备用）
-│   ├── deck-code                # 原生 TUI 启动入口
-│   ├── deck-code-sdk            # 精简 Agent SDK 客户端入口
-│   ├── claude_hook.py           # Claude Code 全生命周期钩子脚本
-│   ├── virtual_deck.py          # 桌面原生 320x240 交互仿真器 (监听 127.0.0.1:19843)
-│   ├── test_ble.py              # BLE 物理真机联调测试脚本
-│   ├── start_deck.sh            # 前台一键启动脚本
-│   ├── run_simulator.sh         # 启动桌面原生交互仿真器
-│   ├── install_service.sh       # 注册为 macOS 后台开机自启服务 (launchd)
-│   └── uninstall_service.sh     # 卸载后台服务
-├── tests/                        # 自动化测试套件
-│   └── test_hmi_simulator.py    # HMI 视觉规范、热区边界与安全白名单单测
-├── docs/                         # 架构设计文档
-│   └── ARCHITECTURE.md          # 软硬件架构与踩坑复盘
-├── LICENSE                       # MIT 开源协议
-└── README.md
-```
+## 准备工作
 
----
+### 硬件
 
-## 🚀 快速上手 / Quick Start
+- ESP32-2432S028 / CYD 2.8 英寸触控开发板
+- 一根可以传输数据的 USB 线
+- 一台支持蓝牙的 Mac
 
-### 步骤 1：烧录固件到开发板
+当前主机端使用 macOS CoreBluetooth，Windows 和 Linux 尚未提供安装脚本。
 
-确保你的电脑已安装 [PlatformIO](https://platformio.org/)（可通过 `pip install platformio` 或 `uv tool install platformio` 安装）：
+### 软件
+
+- 已经可以正常运行的 Claude Code CLI
+- [Homebrew](https://brew.sh/)
+- `uv` 和 PlatformIO
 
 ```bash
-# 1. 进入固件工程目录
+brew install uv platformio
+```
+
+## 安装与部署
+
+### 1. 下载项目
+
+```bash
+git clone https://github.com/leilintao/claude-deck.git
+cd claude-deck
+```
+
+### 2. 编译并烧录副屏
+
+连接开发板后，先查看串口名称：
+
+```bash
 cd firmware
-
-# 2. 将 ESP32 通过 Type-C 数据线连接至电脑，编译并烧录
-pio run -t upload
+pio device list
 ```
 
-> **烧录成功后**：屏幕背光点亮，显示深色机甲风 `CLAUDE DECK` 待命大盘，板载绿色指示灯亮起。闲置 60 秒后背光会自动柔化降亮。
-
----
-
-### 步骤 2：首次绑定副屏
-
-固件烧录完成后，运行绑定程序。Mac 弹出蓝牙配对窗口时，输入**实体副屏屏幕上显示**的六位数字；程序会将所选设备的 CoreBluetooth 标识保存在当前用户的 `~/.config/claude-deck/device-id` 中。固件只接受首次成功绑定的主机。更换 Mac 时需清除开发板的 NVS 后重新绑定。
+找到类似 `/dev/cu.usbserial-1120` 的设备，然后烧录：
 
 ```bash
-cd .. # 若刚完成上一步的 firmware 目录操作，先回到仓库根目录
+pio run -t upload --upload-port /dev/cu.usbserial-1120
+cd ..
+```
+
+请把命令中的串口替换成自己电脑显示的名称。烧录完成后，副屏会自动重启。
+
+### 3. 首次蓝牙配对
+
+```bash
 uv run --with bleak python3 host/enroll_deck.py
 ```
 
-### 步骤 3：启动 Mac 端蓝牙守护进程
+按终端提示选择 `Claude-Deck`。Mac 出现配对窗口时，输入副屏显示的六位数字；确认副屏显示 `ONLINE` 后，在终端输入 `yes`。
 
-推荐使用 `uv` 运行 Python 脚本（无需手动配置 Python 虚拟环境）：
+macOS 第一次运行时可能询问蓝牙权限，请允许当前终端或 Python 使用蓝牙。
 
-```bash
-cd host
-
-# 方式 A：前台运行（可查看实时蓝牙交互日志）
-./start_deck.sh
-
-# 方式 B：注册为 macOS 开机后台自启服务
-./install_service.sh
-```
-
----
-
-### 步骤 4：启动原生 TUI Deck Code（推荐）
-
-`deck-code` 在透明 PTY 中运行本机原版 Claude Code，因此欢迎页、输入框、思考动画、问题卡和斜杠命令都由 Claude Code 原生 TUI 渲染。同一个结构化问题会同时出现在当前终端与实体副屏，副屏选择会转换成原生 TUI 按键；终端先回答时会取消副屏卡片。不会打开额外 Terminal 窗口。
-
-它直接运行 `claude`，所以 CCSwitch 当前选中的网关、令牌、模型、插件、`CLAUDE.md` 和项目设置全部保持原样。默认追加 `--dangerously-skip-permissions`；传入 `--no-bypass-permissions` 可以恢复 Claude Code 权限模式。
+### 4. 安装后台服务
 
 ```bash
-# 首次安装原生问题同步 Hook
-python3 ./host/configure_native_tui.py
-
-# 在当前目录以原生 Claude Code TUI 开始交互
-./host/deck-code --cwd "$PWD"
-
-# 使用原生权限模式
-./host/deck-code --no-bypass-permissions --cwd "$PWD"
+./host/install_service.sh
 ```
 
-只有 Claude 实际调用 `AskUserQuestion` 时才存在可同步的问题事件。`deck-code` 会向原生系统提示追加约束，要求需要用户选择、确认或澄清时使用该工具；模型直接输出的普通问句仍然只是文本，不会在副屏生成可点击卡片。
+该脚本会把蓝牙守护进程注册为当前用户的 macOS 后台服务。日志位于：
 
-### 步骤 5：配置 Claude Code 钩子（兼容旧版工作流）
-
-在你的 Claude Code 全局配置文件 `~/.claude/settings.json` 中添加 `PreToolUse` 与 `PermissionRequest` 钩子配置。推荐只让 `AskUserQuestion` 进入 `PreToolUse`：副屏继续承接 Claude 的提问，而 `Bash`、`Write`、`Edit` 等操作仅在 Claude Code 自身发出权限请求时才显示实体审批卡。
-
-即使你用 `claude --dangerously-skip-permissions` 启动，`AskUserQuestion` 的 `PreToolUse` Hook 仍会把选择题交给副屏；该启动参数只会跳过 Claude Code 的原生工具权限弹窗。
-
-每道由副屏承接的问题也会打开一个 Claude Deck 终端选择窗口。两个入口共用同一个答案：任一端先选择，另一端立即失效；终端窗口输入 `0` 会转回 Claude Code 的原生问题界面，便于输入自由文本。
-副屏与终端窗口均支持单选和多选；多选时在副屏勾选后点击 `SUBMIT`，在终端用逗号分隔编号提交。
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "AskUserQuestion",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/你的绝对路径/ESP/host/claude_hook.py"
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/你的绝对路径/ESP/host/claude_hook.py"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/你的绝对路径/ESP/host/claude_hook.py"
-          }
-        ]
-      }
-    ]
-  }
-}
+```text
+~/Library/Logs/claude_deck.log
 ```
 
-> **可选环境变量**：
-> - `CLAUDE_DECK_OFFLINE_POLICY=deny|allow`：副屏离线时的回退策略（默认 `deny` 故障安全拦截）。
-> - `CLAUDE_DECK_INTERCEPT_MODE=pre_tool_use|notify_only`：默认 `pre_tool_use`，会拦截所有被 `PreToolUse.matcher` 匹配的非只读工具调用。推荐配置只匹配 `AskUserQuestion`，让其它操作沿用 Claude Code 的原生权限判断。`notify_only` 仅展示状态，权限仍由 Claude Code 原生流程决定。
-> - `CLAUDE_DECK_TIMEOUT=120`：审批与提问的超时熔断秒数（默认 `120` 秒）。
+如需卸载：
 
-> 守护进程和 Hook 自动共用权限为 `0600` 的本机 IPC 令牌。首次绑定与使用后台服务时，应以同一个 macOS 用户运行。安全只读 Bash 规则只自动放行受限参数；被 Claude Code 请求授权的其它命令会进入实体审批。
+```bash
+./host/uninstall_service.sh
+```
 
----
+### 5. 安装 Claude Code Hook
 
-## 🎯 效果演示与交互体验
+```bash
+python3 host/configure_native_tui.py
+```
 
-1. **高危权限双键把关**：
-   - 当 Claude 请求执行高危命令或修改文件时，副屏发出双音阶提醒，顶部显示工具徽章（如 `[BASH EXEC]`）与风险等级（`HIGH RISK` / `CRITICAL`），底部动态倒计时 `⚡ 120s 超时熔断`；
-   - 如果详情超过 3 行，代码框右下角会出现 `[▾ 1/2]` 标记，轻触代码框可逐页审阅；超过副屏容量时，将在终端展示完整请求供审批；
-   - 点 **`[ 允许 (Y) ]`** ➡️ 亮绿灯并展示绿色 `APPROVED` 放行页，2.5 秒后自动归位待命页；
-   - 点 **`[ 拒绝 (N) ]`** ➡️ 亮红灯并展示红色 `STOPPED` 拦截页，Claude 收到拒绝原因并中止高危操作。
-2. **Claude 提问页（`AskUserQuestion`）**：
-   - 副屏显示问题与选项卡片，超过两个选项自动开启右侧滑动条与底部 `◀ PREV` / `NEXT ▶` 分页；用户点选后结果直接回传给 Claude Code 继续执行。
-3. **一键静音与夜间自动调光**：
-   - 在待命页点击底部中间的 **`AUDIO TAP`** 卡片（或状态栏右上角 `SND/MUTE`）即可随时开启/关闭蜂鸣器提示音；
-   - 待命闲置 60 秒后屏幕自动降至 14% 柔和背光并熄灭 RGB 灯，收到新消息或轻触屏幕即刻唤醒。
+脚本会保留现有 Claude Code 配置，并在首次运行时备份为：
 
----
+```text
+~/.claude/settings.json.deck-backup
+```
 
-## 🤝 贡献与感谢 / Contributions & Credits
+### 6. 启动 Claude Code
 
-- [LovyanGFX](https://github.com/lovyan03/LovyanGFX) — 卓越的跨平台图形引擎
-- [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino) — 轻量级低功耗蓝牙协议栈
-- [XPT2046_Touchscreen](https://github.com/PaulStoffregen/XPT2046_Touchscreen) — 经典的触控屏驱动
-- [ESP32 Cheap Yellow Display](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display) — CYD 社区开拓者
+在需要工作的项目目录中运行：
 
----
+```bash
+/你下载项目的位置/claude-deck/host/deck-code --cwd "$PWD"
+```
 
-## 📄 开源许可证 / License
+例如仓库位于 `~/claude-deck`：
 
-本项目采用 [MIT License](LICENSE) 开源协议。
+```bash
+~/claude-deck/host/deck-code --cwd "$PWD"
+```
+
+`deck-code` 默认加入 `--dangerously-skip-permissions`，适合主要使用副屏回答 Claude 问题的用户。此模式下 Claude 不会产生原生权限请求，因此副屏也不会显示权限审批卡。
+
+如需同时测试或使用实体权限审批，请运行：
+
+```bash
+~/claude-deck/host/deck-code --no-bypass-permissions --cwd "$PWD"
+```
+
+`deck-code` 最终仍调用电脑上的原版 `claude` 命令，因此可以继续使用 CCSwitch。
+
+## 使用方法
+
+- **单选问题**：直接点击副屏选项。
+- **多选问题**：勾选一个或多个选项，再点击 `SUBMIT`。
+- **长内容**：点击中央内容框翻到下一页。
+- **权限请求**：核对命令或文件内容后点击“允许”或“拒绝”。
+- **静音**：点击右上角 `SND/MUTE`，或待命页底部的音频按钮。
+- **终端作答**：Claude 原生问题卡仍可正常操作，终端先提交后副屏卡片会失效。
+
+只有 Claude 实际调用 `AskUserQuestion` 时，问题才能成为可同步的交互卡。Claude 直接输出在聊天正文里的普通问句无法被可靠地转换成副屏按钮。
+
+## 交给 AI 自动安装
+
+可以把下面这段话连同项目路径交给本地编码 AI：
+
+> 请部署当前 Claude Deck 项目。先确认系统是 macOS，并检查 `claude`、`uv`、`pio` 是否存在；不要覆盖已有的 `~/.claude/settings.json`。使用 `pio device list` 识别 ESP32 串口，编译并烧录 `firmware`。烧录成功后暂停，让我亲自完成六位数蓝牙配对和副屏确认。然后运行 `host/install_service.sh` 与 `host/configure_native_tui.py`，检查后台日志确认副屏 ONLINE，运行自动化测试，最后告诉我 `deck-code` 的绝对启动命令。不要替我猜测串口、配对码或实体触控结果。
+
+AI 部署时可按以下验收顺序执行：
+
+```bash
+claude --version
+uv --version
+pio --version
+pio device list
+pio run -d firmware
+launchctl list | grep claude.deck
+tail -n 30 ~/Library/Logs/claude_deck.log
+uv run --with bleak --with pygame-ce python3 -m unittest discover -s tests -q
+```
+
+## 常见问题
+
+### 副屏没有显示问题
+
+检查后台服务和连接日志：
+
+```bash
+launchctl list | grep claude.deck
+tail -f ~/Library/Logs/claude_deck.log
+```
+
+确认副屏显示 `ONLINE`，并使用 `deck-code` 启动 Claude。普通文本问题不会触发副屏，必须是 `AskUserQuestion` 事件。
+
+### 找不到开发板串口
+
+确认 USB 线支持数据传输，重新插拔后再次运行 `pio device list`。常见名称包含 `usbserial`、`usbmodem`、`wch` 或 `SLAB`。
+
+### 配对后仍然离线
+
+打开 macOS 蓝牙，确认终端拥有蓝牙权限，然后重启服务：
+
+```bash
+./host/install_service.sh
+```
+
+### 想先看看界面，不连接硬件
+
+```bash
+./host/run_simulator.sh
+```
+
+## 项目目录
+
+```text
+firmware/    ESP32 固件与 PlatformIO 配置
+host/        Mac 守护进程、Hook、原生 TUI 桥和模拟器
+tests/       主机端自动化测试
+docs/        架构与实现说明
+screenshots/ HMI 截图
+```
+
+## License
+
+[MIT](LICENSE)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the AskUserQuestion hooks required by the native TUI bridge."""
+"""Install the Claude Code hooks required by Claude Deck."""
 
 import json
 from pathlib import Path
@@ -30,12 +30,13 @@ def main():
     hooks = settings.setdefault("hooks", {})
     ensure_command_hook(hooks, "PreToolUse", "AskUserQuestion", command)
     ensure_command_hook(hooks, "PostToolUse", "AskUserQuestion", command)
+    ensure_command_hook(hooks, "PermissionRequest", "", command)
 
     temporary = settings_path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     temporary.chmod(0o600)
     temporary.replace(settings_path)
-    print("Claude Deck 原生 TUI Hook 已配置。")
+    print("Claude Deck 问题同步与权限审批 Hook 已配置。")
     print(f"备份：{backup_path}")
 
 
