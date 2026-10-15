@@ -1,13 +1,18 @@
 import asyncio
+import base64
 import errno
 import json
 import logging
 import os
 import secrets
+import shlex
+import subprocess
 import sys
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from bleak import BleakClient, BleakScanner
 
@@ -155,6 +160,45 @@ class DeckBridge:
         except Exception as e:
             logging.error(f"解析触控数据失败: {e}")
 
+    async def answer_terminal_question(self, request_id, index):
+        """Accept a choice from the companion terminal for a live deck question."""
+        waiter = self.pending_requests.get(str(request_id).lower())
+        if not waiter or waiter["kind"] != "question" or waiter["event"].is_set():
+            return False
+        if index == -1:
+            waiter["response"] = "cancelled"
+        else:
+            waiter["response"] = {"kind": "select", "index": index}
+        waiter["event"].set()
+        return True
+
+    def question_is_pending(self, request_id):
+        waiter = self.pending_requests.get(str(request_id).lower())
+        return bool(waiter and waiter["kind"] == "question" and not waiter["event"].is_set())
+
+    def launch_terminal_question(self, request_id, header, question, options, timeout):
+        """Open a small companion terminal that races the physical deck."""
+        if sys.platform != "darwin" or os.environ.get("CLAUDE_DECK_TERMINAL_QUESTION", "1") == "0":
+            return
+        helper = Path(__file__).with_name("terminal_question.py")
+        payload = base64.urlsafe_b64encode(
+            json.dumps(
+                {"header": header, "question": question, "options": options, "timeout": timeout},
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).decode("ascii")
+        command = shlex.join(
+            [sys.executable, str(helper), "--request-id", request_id, "--payload", payload]
+        )
+        try:
+            subprocess.Popen(
+                ["osascript", "-e", f"tell application \"Terminal\" to do script {json.dumps(command)}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            logging.exception("无法打开 Claude Deck 终端选择窗口")
+
     def ble_chunk_size(self):
         # macOS silently truncates write-without-response payloads larger than
         # (ATT MTU - 3), and the firmware then drops the half-written JSON.
@@ -241,14 +285,17 @@ class DeckBridge:
                 return None
 
             logging.info(f"已推送 Claude 问题至副屏: [{request_id}] {question}")
+            self.launch_terminal_question(request_id, header, question, options, timeout)
             try:
                 await asyncio.wait_for(waiter["event"].wait(), timeout=timeout)
                 response = waiter["response"]
                 if isinstance(response, dict) and response.get("kind") == "select":
                     index = int(response.get("index", -1))
                     if 0 <= index < len(options):
-                        logging.info(f"副屏用户选择选项: {index}")
+                        logging.info(f"Claude Deck 问题已选择选项: {index}")
                         return index
+                if response == "cancelled":
+                    await self.send_status("idle", "已转回 Claude 原生输入", force=True)
                 return None
             except asyncio.TimeoutError:
                 logging.warning("副屏问题响应超时 (%ss)，回退到终端原生 UI", timeout)
@@ -323,16 +370,53 @@ bridge = DeckBridge()
 
 
 class HookHTTPHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
+    def _authorized(self):
         token = self.headers.get("X-Claude-Deck-Token", "")
-        if not secrets.compare_digest(token, IPC_TOKEN):
-            self.send_error(403, "Invalid deck IPC token")
+        if secrets.compare_digest(token, IPC_TOKEN):
+            return True
+        self.send_error(403, "Invalid deck IPC token")
+        return False
+
+    def do_GET(self):
+        if not self._authorized():
+            return
+        parsed = urlparse(self.path)
+        if parsed.path != "/question_status":
+            self.send_error(404)
+            return
+        request_id = parse_qs(parsed.query).get("id", [""])[0]
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"pending": bridge.question_is_pending(request_id)}).encode("utf-8"))
+
+    def do_POST(self):
+        if not self._authorized():
             return
         length = int(self.headers.get("Content-Length", 0))
         if length < 0 or length > 8192:
             self.send_error(413, "Deck IPC payload too large")
             return
-        if self.path == "/notify_question":
+        if self.path == "/question_answer":
+            body = self.rfile.read(length).decode("utf-8")
+            try:
+                data = json.loads(body)
+                request_id = str(data.get("id") or "")
+                index = int(data.get("index"))
+                future = asyncio.run_coroutine_threadsafe(
+                    bridge.answer_terminal_question(request_id, index), bridge.loop
+                )
+                if not future.result(timeout=2):
+                    self.send_error(409, "Question is no longer pending")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"accepted": true}')
+            except Exception:
+                logging.exception("处理终端问题选择失败")
+                self.send_error(400, "Invalid terminal question answer")
+        elif self.path == "/notify_question":
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length).decode("utf-8")
             try:

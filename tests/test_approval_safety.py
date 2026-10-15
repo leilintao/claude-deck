@@ -99,6 +99,18 @@ class ApprovalSafetyTests(unittest.TestCase):
             self.assertEqual(bridge.pending_requests["abc"]["response"], "allow")
         asyncio.run(run())
 
+    def test_terminal_question_answer_races_the_deck(self):
+        async def run():
+            bridge = DeckBridge()
+            event = asyncio.Event()
+            bridge.pending_requests["question"] = {"event": event, "response": None, "kind": "question"}
+            self.assertTrue(bridge.question_is_pending("question"))
+            self.assertTrue(await bridge.answer_terminal_question("question", 1))
+            self.assertTrue(event.is_set())
+            self.assertEqual(bridge.pending_requests["question"]["response"], {"kind": "select", "index": 1})
+            self.assertFalse(await bridge.answer_terminal_question("question", 0))
+        asyncio.run(run())
+
     def test_http_post_requires_token(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), HookHTTPHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
